@@ -1,0 +1,444 @@
+/* Daily View Styles */
+.daily-view {
+    width: 100%;
+    height: 100%;
+    overflow: auto;
+}
+
+.schedule-grid {
+    display: flex;
+    min-width: fit-content;
+}
+
+.time-column {
+    width: 80px;
+    flex-shrink: 0;
+    border-right: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    position: sticky;
+    left: 0;
+    z-index: 2;
+}
+
+.time-slot {
+    height: 60px;
+    padding: var(--spacing-xs) var(--spacing-sm);
+    border-bottom: 1px solid var(--border-color);
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    display: flex;
+    align-items: flex-start;
+    padding-top: var(--spacing-xs);
+}
+
+.time-slot-minor {
+    height: 60px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.machines-container {
+    display: flex;
+    flex: 1;
+}
+
+.machine-column {
+    flex: 1;
+    min-width: 200px;
+    border-right: 1px solid var(--border-color);
+}
+
+.machine-header {
+    padding: var(--spacing-md);
+    background: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border-color);
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+
+.machine-name {
+    font-weight: 600;
+    color: var(--text-primary);
+    font-size: 0.875rem;
+    margin-bottom: var(--spacing-xs);
+}
+
+.machine-code {
+    font-size: 0.75rem;
+    color: var(--text-tertiary);
+}
+
+.machine-timeline {
+    position: relative;
+    min-height: calc(9.5 * 60px); /* 8 AM to 5:30 PM = 9.5 hours */
+}
+
+.scheduled-job {
+    position: absolute;
+    left: var(--spacing-xs);
+    right: var(--spacing-xs);
+    padding: var(--spacing-xs) var(--spacing-sm);
+    border-radius: var(--radius-sm);
+    border-left: 3px solid;
+    font-size: 0.75rem;
+    cursor: pointer;
+    transition: all var(--transition-base);
+    overflow: hidden;
+    min-height: 40px;
+}
+
+.scheduled-job:hover {
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-md);
+    z-index: 10;
+}
+
+.job-pending {
+    background: rgba(100, 116, 139, 0.15);
+    border-left-color: var(--text-muted);
+    color: var(--text-secondary);
+}
+
+.job-started {
+    background: rgba(245, 158, 11, 0.2);
+    border-left-color: var(--accent-warning);
+    color: var(--accent-warning);
+}
+
+.job-completed {
+    background: rgba(16, 185, 129, 0.15);
+    border-left-color: var(--accent-success);
+    color: var(--accent-success);
+}
+
+.job-code {
+    font-weight: 600;
+    margin-bottom: 2px;
+}
+
+.job-time {
+    font-size: 0.7rem;
+    opacity: 0.8;
+    margin-bottom: 2px;
+}
+
+.job-qty {
+    font-size: 0.7rem;
+    opacity: 0.7;
+}
+
+/* Weekly View Styles */
+.weekly-view {
+    width: 100%;
+    height: 100%;
+    overflow: auto;
+}
+
+.weekly-grid {
+    display: flex;
+    flex-direction: column;
+    min-width: fit-content;
+}
+
+.weekly-header {
+    display: grid;
+    grid-template-columns: 200px repeat(7, 1fr);
+    background: var(--bg-tertiary);
+    border-bottom: 2px solid var(--border-color);
+    position: sticky;
+    top: 0;
+    z-index: 2;
+}
+
+.machine-row-header {
+    padding: var(--spacing-md);
+    font-weight: 600;
+    color: var(--text-primary);
+    border-right: 1px solid var(--border-color);
+}
+
+.day-header {
+    padding: var(--spacing-md);
+    text-align: center;
+    border-right: 1px solid var(--border-color);
+}
+
+.day-name {
+    font-weight: 600;
+    color: var(--text-primary);
+    font-size: 0.875rem;
+    margin-bottom: var(--spacing-xs);
+}
+
+.day-date {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
+.weekly-row {
+    display: grid;
+    grid-template-columns: 200px repeat(7, 1fr);
+    border-bottom: 1px solid var(--border-color);
+    min-height: 120px;
+}
+
+.machine-cell {
+    padding: var(--spacing-md);
+    border-right: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    position: sticky;
+    left: 0;
+    z-index: 1;
+}
+
+.machine-cell .machine-name {
+    font-weight: 600;
+    color: var(--text-primary);
+    font-size: 0.875rem;
+    margin-bottom: var(--spacing-xs);
+}
+
+.machine-cell .machine-code {
+    font-size: 0.75rem;
+    color: var(--text-tertiary);
+    margin-bottom: var(--spacing-xs);
+}
+
+.machine-job-count {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+}
+
+.day-cell {
+    padding: var(--spacing-sm);
+    border-right: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    min-height: 120px;
+}
+
+.day-jobs-group {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-xs);
+}
+
+.day-jobs-count {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: var(--spacing-xs);
+}
+
+.day-jobs-hours {
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    margin-bottom: var(--spacing-xs);
+}
+
+.day-jobs-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--spacing-xs);
+}
+
+.job-chip {
+    padding: 2px 6px;
+    border-radius: var(--radius-sm);
+    font-size: 0.7rem;
+    font-weight: 500;
+    border: 1px solid;
+}
+
+.job-chip.job-pending {
+    background: rgba(100, 116, 139, 0.15);
+    border-color: var(--text-muted);
+    color: var(--text-secondary);
+}
+
+.job-chip.job-started {
+    background: rgba(245, 158, 11, 0.2);
+    border-color: var(--accent-warning);
+    color: var(--accent-warning);
+}
+
+.job-chip.job-completed {
+    background: rgba(16, 185, 129, 0.15);
+    border-color: var(--accent-success);
+    color: var(--accent-success);
+}
+
+/* Monthly View Styles */
+.monthly-view {
+    width: 100%;
+    height: 100%;
+    overflow: auto;
+    display: flex;
+    flex-direction: column;
+}
+
+.monthly-header {
+    padding: var(--spacing-md);
+    border-bottom: 1px solid var(--border-color);
+    margin-bottom: var(--spacing-md);
+    flex-shrink: 0;
+}
+
+.month-name {
+    font-size: 1.25rem;
+    font-weight: 700;
+    background: var(--gradient-primary);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+.monthly-machines-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: var(--spacing-lg);
+    padding: var(--spacing-md);
+    flex: 1;
+    overflow-y: auto;
+}
+
+.machine-calendar-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    min-height: 400px;
+    max-height: 500px;
+}
+
+.machine-calendar-header {
+    padding: var(--spacing-md);
+    background: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border-color);
+    flex-shrink: 0;
+}
+
+.machine-calendar-name {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 2px;
+}
+
+.machine-calendar-code {
+    font-size: 0.75rem;
+    color: var(--text-tertiary);
+}
+
+.machine-calendar-grid {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow-y: auto;
+}
+
+.machine-week-header {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    background: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border-color);
+    flex-shrink: 0;
+}
+
+.machine-weekday-header {
+    padding: var(--spacing-xs) var(--spacing-sm);
+    text-align: center;
+    font-weight: 600;
+    color: var(--text-primary);
+    font-size: 0.7rem;
+    border-right: 1px solid var(--border-color);
+}
+
+.machine-weekday-header:last-child {
+    border-right: none;
+}
+
+.machine-week-row {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    flex-shrink: 0;
+    min-height: 40px;
+}
+
+.machine-day {
+    padding: 2px 4px;
+    border-right: 1px solid var(--border-color);
+    border-bottom: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    min-height: 40px;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+}
+
+.machine-week-row .machine-day:last-child {
+    border-right: none;
+}
+
+.machine-day.empty {
+    background: var(--bg-primary);
+    opacity: 0.3;
+}
+
+.machine-day.today {
+    background: rgba(99, 102, 241, 0.1);
+    border-color: var(--accent-primary);
+}
+
+.machine-day-number {
+    font-size: 0.65rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 2px;
+    line-height: 1;
+}
+
+.machine-day.today .machine-day-number {
+    color: var(--accent-primary);
+    font-weight: 700;
+}
+
+.machine-day-load {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    justify-content: flex-end;
+}
+
+.machine-load-bar {
+    height: 3px;
+    border-radius: var(--radius-sm);
+    transition: all var(--transition-base);
+}
+
+.load-very-low {
+    background: rgba(100, 116, 139, 0.3);
+}
+
+.load-low {
+    background: rgba(16, 185, 129, 0.4);
+}
+
+.load-medium {
+    background: rgba(245, 158, 11, 0.5);
+}
+
+.load-high {
+    background: rgba(239, 68, 68, 0.6);
+}
+
+.machine-day-job-count {
+    font-size: 0.6rem;
+    color: var(--text-tertiary);
+    font-weight: 500;
+    line-height: 1;
+}
+

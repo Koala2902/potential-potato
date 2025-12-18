@@ -94,22 +94,29 @@
 
 .app-content {
     flex: 1;
+    overflow: hidden;
+}
+
+/* Operation page specific layout */
+.ticket-page {
+    width: 100%;
+    height: 100%;
     display: grid;
     grid-template-columns: 320px 1fr 380px;
     overflow: hidden;
 }
 
-.left-panel {
+.ticket-page .left-panel {
     grid-column: 1;
     overflow: hidden;
 }
 
-.middle-panel {
+.ticket-page .middle-panel {
     grid-column: 2;
     overflow: hidden;
 }
 
-.right-panel {
+.ticket-page .right-panel {
     grid-column: 3;
     overflow: hidden;
 }
