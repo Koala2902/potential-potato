@@ -75,7 +75,8 @@ export interface ImpositionItem {
 }
 
 export interface ImpositionDetails {
-  imposition_id: string;
-  file_id: string;
-  [key: string]: any;
+    imposition_id: string;
+    file_ids?: string[];
+    file_id?: string; // Keep for backward compatibility
+    [key: string]: any;
 }

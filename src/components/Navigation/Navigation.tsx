@@ -1,7 +1,7 @@
-import { Settings, Calendar, Factory } from 'lucide-react';
+import { Settings, Calendar, Factory, Activity } from 'lucide-react';
 import './Navigation.css';
 
-type Page = 'operation' | 'schedule' | 'production';
+type Page = 'operation' | 'schedule' | 'production' | 'jobstatus';
 
 interface NavigationProps {
     currentPage: Page;
@@ -13,6 +13,7 @@ export default function Navigation({ currentPage, onPageChange }: NavigationProp
         { id: 'operation' as Page, label: 'Operation', icon: Settings },
         { id: 'schedule' as Page, label: 'Schedule', icon: Calendar },
         { id: 'production' as Page, label: 'Production', icon: Factory },
+        { id: 'jobstatus' as Page, label: 'Job Status', icon: Activity },
     ];
 
     return (

@@ -1,11 +1,10 @@
-import { useState, useMemo } from 'react';
+import { useState } from 'react';
 import { Calendar, ChevronLeft, ChevronRight, CheckSquare, Square } from 'lucide-react';
 import DailyView from './components/DailyView';
 import WeeklyView from './components/WeeklyView';
 import MonthlyView from './components/MonthlyView';
 import { mockMachines } from '../../data/scheduleData';
 import { mockScheduledJobs } from '../../data/scheduleData';
-import { Machine } from '../../types';
 import './SchedulePage.css';
 
 type ViewType = 'daily' | 'weekly' | 'monthly';

@@ -77,7 +77,7 @@ export default function WeeklyView({
                                 <div className="machine-code">{machine.code}</div>
                                 <div className="machine-job-count">{totalJobs} jobs</div>
                             </div>
-                            {weekDates.map((date, dayIdx) => {
+                            {weekDates.map((_date, dayIdx) => {
                                 const dayJobs = machineJobsByDay[dayIdx];
                                 const totalHours = dayJobs.reduce(
                                     (sum, job) => sum + getJobDuration(job),

@@ -21,15 +21,32 @@ export async function fetchImpositionDetails(impositionId: string): Promise<Impo
     return response.json();
 }
 
-export async function fetchFileId(impositionId: string): Promise<string | null> {
-    const response = await fetch(`${API_BASE_URL}/imposition/${impositionId}/file-id`);
+export async function fetchFileIds(impositionId: string): Promise<string[]> {
+    const response = await fetch(`${API_BASE_URL}/imposition/${impositionId}/file-ids`);
     if (!response.ok) {
         if (response.status === 404) {
-            return null;
+            return [];
         }
-        throw new Error('Failed to fetch file_id');
+        throw new Error('Failed to fetch file_ids');
     }
     const data = await response.json();
-    return data.fileId;
+    return data.fileIds || [];
+}
+
+export async function processScan(scanInput: string): Promise<{ runlistId: string; queue: ProductionQueueItem[] }> {
+    const response = await fetch(`${API_BASE_URL}/scan`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ scan: scanInput }),
+    });
+    if (!response.ok) {
+        if (response.status === 404) {
+            throw new Error('No runlist found for this scan');
+        }
+        throw new Error('Failed to process scan');
+    }
+    return response.json();
 }
 

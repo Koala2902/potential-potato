@@ -3,10 +3,11 @@ import Navigation from './components/Navigation/Navigation';
 import TicketPage from './pages/TicketPage/TicketPage';
 import SchedulePage from './pages/SchedulePage/SchedulePage';
 import ProductionPage from './pages/ProductionPage/ProductionPage';
+import JobStatusPage from './pages/JobStatusPage/JobStatusPage';
 import { Scan } from 'lucide-react';
 import './App.css';
 
-type Page = 'operation' | 'schedule' | 'production';
+type Page = 'operation' | 'schedule' | 'production' | 'jobstatus';
 
 function App() {
     const [currentPage, setCurrentPage] = useState<Page>('operation');
@@ -36,6 +37,7 @@ function App() {
                 {currentPage === 'operation' && <TicketPage />}
                 {currentPage === 'schedule' && <SchedulePage />}
                 {currentPage === 'production' && <ProductionPage />}
+                {currentPage === 'jobstatus' && <JobStatusPage />}
             </main>
         </div>
     );

@@ -50,9 +50,9 @@ export default function ProductionQueueList({
                                         )}
                                     </div>
                                     <div className="runlist-info">
-                                        <div className="runlist-id">Runlist: {item.runlist_id}</div>
+                                        <div className="runlist-id">{item.runlist_id}</div>
                                         <div className="runlist-count">
-                                            {item.imposition_count} {item.imposition_count === 1 ? 'job' : 'jobs'}
+                                            {item.imposition_count} {item.imposition_count === 1 ? 'imposition' : 'impositions'}
                                         </div>
                                     </div>
                                 </div>
@@ -73,9 +73,6 @@ export default function ProductionQueueList({
                                                 >
                                                     <div className="imposition-name">
                                                         {imposition.simplified_name}
-                                                    </div>
-                                                    <div className="imposition-id">
-                                                        {imposition.imposition_id}
                                                     </div>
                                                 </div>
                                             );

@@ -1,22 +1,31 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import ProductionQueueList from '../../components/LeftPanel/ProductionQueueList';
 import ImpositionViewer from '../../components/MiddlePanel/ImpositionViewer';
 import ProductionInfo from '../../components/RightPanel/ProductionInfo';
 import { ProductionQueueItem, ImpositionItem, ImpositionDetails } from '../../types';
-import { fetchProductionQueue, fetchImpositionDetails, fetchFileId } from '../../services/api';
+import { fetchProductionQueue, fetchImpositionDetails, fetchFileIds, processScan } from '../../services/api';
 
 export default function TicketPage() {
     const [queue, setQueue] = useState<ProductionQueueItem[]>([]);
     const [selectedImposition, setSelectedImposition] = useState<ImpositionItem | null>(null);
     const [impositionDetails, setImpositionDetails] = useState<ImpositionDetails | null>(null);
-    const [fileId, setFileId] = useState<string | null>(null);
+    const [fileIds, setFileIds] = useState<string[]>([]);
     const [expandedRunlists, setExpandedRunlists] = useState<Set<string>>(new Set());
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [scanInput, setScanInput] = useState<string>('');
+    const [isScanning, setIsScanning] = useState(false);
+    const scanInputRef = useRef<HTMLInputElement>(null);
 
-    // Fetch production queue on mount
+    // Fetch production queue on mount - but wait for scan
     useEffect(() => {
-        loadProductionQueue();
+        // Don't load all runlists initially - wait for scan
+        setLoading(false);
+    }, []);
+
+    // Focus scan input on mount
+    useEffect(() => {
+        scanInputRef.current?.focus();
     }, []);
 
     // Fetch details when imposition is selected
@@ -25,7 +34,7 @@ export default function TicketPage() {
             loadImpositionDetails(selectedImposition.imposition_id);
         } else {
             setImpositionDetails(null);
-            setFileId(null);
+            setFileIds([]);
         }
     }, [selectedImposition]);
 
@@ -49,20 +58,21 @@ export default function TicketPage() {
 
     const loadImpositionDetails = async (impositionId: string) => {
         try {
-            const [details, id] = await Promise.all([
+            const [details, ids] = await Promise.all([
                 fetchImpositionDetails(impositionId),
-                fetchFileId(impositionId),
+                fetchFileIds(impositionId),
             ]);
             setImpositionDetails(details);
-            setFileId(id);
+            // Use file_ids from details if available, otherwise use the fetched ones
+            setFileIds(details?.file_ids || ids);
         } catch (err) {
             console.error('Error loading imposition details:', err);
             setImpositionDetails(null);
-            setFileId(null);
+            setFileIds([]);
         }
     };
 
-    const handleSelectImposition = (imposition: ImpositionItem, runlistId: string) => {
+    const handleSelectImposition = (imposition: ImpositionItem, _runlistId: string) => {
         setSelectedImposition(imposition);
     };
 
@@ -78,19 +88,48 @@ export default function TicketPage() {
         });
     };
 
-    // Handle barcode scanning (Enter key)
-    useEffect(() => {
-        const handleKeyPress = (e: KeyboardEvent) => {
-            // Listen for Enter key to simulate a barcode scan
-            if (e.key === 'Enter' && selectedImposition) {
-                // Could add scan logic here if needed
-                console.log('Scanned:', selectedImposition.imposition_id);
-            }
-        };
+    // Handle scan input
+    const handleScanSubmit = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!scanInput.trim() || isScanning) {
+            return;
+        }
 
-        window.addEventListener('keypress', handleKeyPress);
-        return () => window.removeEventListener('keypress', handleKeyPress);
-    }, [selectedImposition]);
+        try {
+            setIsScanning(true);
+            setError(null);
+            setLoading(true);
+
+            // Process scan and get filtered runlist
+            const { runlistId, queue: filteredQueue } = await processScan(scanInput.trim());
+            
+            setQueue(filteredQueue);
+            
+            // Expand the runlist automatically
+            if (filteredQueue.length > 0) {
+                setExpandedRunlists(new Set([runlistId]));
+            }
+
+            // Clear scan input
+            setScanInput('');
+            scanInputRef.current?.focus();
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'Failed to process scan');
+            console.error('Error processing scan:', err);
+        } finally {
+            setIsScanning(false);
+            setLoading(false);
+        }
+    };
+
+    // Handle scan input change (for barcode scanners that auto-submit)
+    const handleScanInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const value = e.target.value;
+        setScanInput(value);
+        
+        // Auto-submit if Enter key was pressed (barcode scanner behavior)
+        // This will be handled by form submit
+    };
 
     if (loading) {
         return (
@@ -116,6 +155,27 @@ export default function TicketPage() {
     return (
         <div className="ticket-page">
             <div className="left-panel">
+                <div className="scan-input-container" style={{ padding: 'var(--spacing-md)', borderBottom: '1px solid var(--border-color)' }}>
+                    <form onSubmit={handleScanSubmit}>
+                        <input
+                            ref={scanInputRef}
+                            type="text"
+                            value={scanInput}
+                            onChange={handleScanInputChange}
+                            placeholder="Scan barcode (job_id_version_tag)..."
+                            disabled={isScanning}
+                            style={{
+                                width: '100%',
+                                padding: 'var(--spacing-sm) var(--spacing-md)',
+                                background: 'var(--bg-tertiary)',
+                                border: '1px solid var(--border-color)',
+                                borderRadius: 'var(--radius-sm)',
+                                color: 'var(--text-primary)',
+                                fontSize: '0.875rem',
+                            }}
+                        />
+                    </form>
+                </div>
                 <ProductionQueueList
                     queue={queue}
                     selectedImpositionId={selectedImposition?.imposition_id || null}
@@ -129,7 +189,7 @@ export default function TicketPage() {
                 <ImpositionViewer
                     imposition={selectedImposition}
                     details={impositionDetails}
-                    fileId={fileId}
+                    fileIds={fileIds}
                 />
             </div>
 
