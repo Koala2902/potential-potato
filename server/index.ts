@@ -17,6 +17,26 @@ console.log(`Host: ${process.env.DB_HOST || 'localhost'}`);
 app.use(cors());
 app.use(express.json());
 
+// Root route - server status
+app.get('/', (req, res) => {
+    res.json({
+        status: 'running',
+        message: 'Production Suite API Server',
+        version: '1.0.0',
+        endpoints: {
+            productionQueue: '/api/production-queue',
+            impositionDetails: '/api/imposition/:impositionId',
+            fileIds: '/api/imposition/:impositionId/file-ids',
+            machines: '/api/machines',
+            operations: '/api/operations?machineId=:machineId',
+            scan: '/api/scan (POST)',
+            scannedCodes: '/api/scanned-codes (POST)'
+        },
+        port: PORT,
+        database: process.env.DB_NAME || 'logs'
+    });
+});
+
 // Get production queue grouped by runlist_id
 app.get('/api/production-queue', async (req, res) => {
     try {
