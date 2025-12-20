@@ -1,5 +1,23 @@
 export type JobStatus = 'pending' | 'started' | 'completed';
 
+// Job Status Categories for JobStatusPage
+export type JobStatusCategory = 'print_ready' | 'printed' | 'digital_cut' | 'slitter' | 'production_finished';
+
+// Group by rules
+export type GroupByRule = 'material' | 'finishing' | 'material_finishing';
+
+// Sort by rules
+export type SortByRule = 'due_date' | 'created_at' | 'job_code';
+
+// Job operations status
+export interface JobOperations {
+  print?: boolean;
+  coating?: boolean;
+  kiss_cut?: boolean;
+  backscore?: boolean;
+  slitter?: boolean;
+}
+
 export interface Job {
   id: string;
   jobCode: string;
@@ -17,6 +35,10 @@ export interface Job {
   createdAt: string;
   startedAt?: string;
   completedAt?: string;
+  // Extended fields for JobStatusPage
+  material?: string;
+  finishing?: string;
+  operations?: JobOperations;
 }
 
 export interface Roll {
@@ -79,4 +101,21 @@ export interface ImpositionDetails {
     file_ids?: string[];
     file_id?: string; // Keep for backward compatibility
     [key: string]: any;
+}
+
+// JobStatusCard configuration
+export interface JobStatusCardConfig {
+  status: JobStatusCategory;
+  filterRule: (job: Job) => boolean;
+  groupBy: GroupByRule;
+  sortBy: SortByRule;
+  title: string;
+  description: string;
+  icon: string; // Icon name for lucide-react
+}
+
+// Grouped jobs for display
+export interface GroupedJobs {
+  groupKey: string;
+  jobs: Job[];
 }

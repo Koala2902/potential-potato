@@ -33,13 +33,62 @@ export async function fetchFileIds(impositionId: string): Promise<string[]> {
     return data.fileIds || [];
 }
 
-export async function processScan(scanInput: string): Promise<{ runlistId: string; queue: ProductionQueueItem[] }> {
+export interface Machine {
+    machine_id: string;
+    machine_name: string;
+    machine_type: string;
+    capabilities: string | null;
+    hourly_rate_aud: number | null;
+    max_web_width_mm: number | null;
+    availability_status: string | null;
+    maintenance_schedule: string | null;
+    shift_hours: number | null;
+}
+
+export async function fetchMachines(): Promise<Machine[]> {
+    const response = await fetch(`${API_BASE_URL}/machines`);
+    if (!response.ok) {
+        throw new Error('Failed to fetch machines');
+    }
+    return response.json();
+}
+
+export interface Operation {
+    operation_id: string;
+    operation_name: string;
+    machine_id: string;
+    operation_category: string;
+    can_run_parallel: boolean;
+    requires_operator: boolean;
+    setup_time_base_minutes: number | null;
+}
+
+export async function fetchOperations(machineId?: string | null): Promise<Operation[]> {
+    const url = machineId 
+        ? `${API_BASE_URL}/operations?machineId=${encodeURIComponent(machineId)}`
+        : `${API_BASE_URL}/operations`;
+    const response = await fetch(url);
+    if (!response.ok) {
+        throw new Error('Failed to fetch operations');
+    }
+    return response.json();
+}
+
+export async function processScan(
+    scanInput: string,
+    machineId?: string | null,
+    operations?: string[] | null
+): Promise<{ runlistId: string; queue: ProductionQueueItem[] }> {
     const response = await fetch(`${API_BASE_URL}/scan`, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ scan: scanInput }),
+        body: JSON.stringify({ 
+            scan: scanInput,
+            machineId: machineId || null,
+            operations: operations || null,
+        }),
     });
     if (!response.ok) {
         if (response.status === 404) {

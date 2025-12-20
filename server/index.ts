@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { getProductionQueue, getImpositionDetails, getFileIds, findRunlistByScan, getProductionQueueByRunlist } from './db/queries.js';
+import { getMachines, getAvailableOperations, recordScannedCode } from './db/jobmanager-queries.js';
 
 dotenv.config();
 
@@ -51,12 +52,79 @@ app.get('/api/imposition/:impositionId/file-ids', async (req, res) => {
     }
 });
 
+// Get machines from jobmanager database
+app.get('/api/machines', async (req, res) => {
+    try {
+        const machines = await getMachines();
+        res.json(machines);
+    } catch (error) {
+        console.error('Error fetching machines:', error);
+        res.status(500).json({ error: 'Failed to fetch machines' });
+    }
+});
+
+// Get available operations (filtered by machine_id)
+app.get('/api/operations', async (req, res) => {
+    try {
+        const { machineId } = req.query;
+        console.log('Fetching operations for machine_id:', machineId);
+        const operations = await getAvailableOperations(machineId as string | undefined);
+        console.log('Returning operations:', operations.length);
+        res.json(operations);
+    } catch (error) {
+        console.error('Error fetching operations:', error);
+        res.status(500).json({ error: 'Failed to fetch operations' });
+    }
+});
+
+// Record a scanned code
+app.post('/api/scanned-codes', async (req, res) => {
+    try {
+        const { codeText, machineId, userId, operations, metadata } = req.body;
+        
+        if (!codeText || typeof codeText !== 'string') {
+            return res.status(400).json({ error: 'codeText is required' });
+        }
+
+        const scannedCode = await recordScannedCode(
+            codeText,
+            machineId || null,
+            userId || null,
+            operations || null,
+            metadata || null
+        );
+        
+        res.json(scannedCode);
+    } catch (error) {
+        console.error('Error recording scanned code:', error);
+        res.status(500).json({ error: 'Failed to record scanned code' });
+    }
+});
+
 // Find runlist by scan (format: job_id_version_tag, e.g., "4604_5889_1")
+// Also records the scan to scanned_codes if machineId and operations are provided
 app.post('/api/scan', async (req, res) => {
     try {
-        const { scan } = req.body;
+        const { scan, machineId, operations, userId } = req.body;
+        
         if (!scan || typeof scan !== 'string') {
             return res.status(400).json({ error: 'Scan input is required' });
+        }
+
+        // Record scan to scanned_codes if machineId and operations are provided
+        if (machineId && operations && Array.isArray(operations) && operations.length > 0) {
+            try {
+                await recordScannedCode(
+                    scan,
+                    machineId,
+                    userId || null,
+                    { operations },
+                    { timestamp: new Date().toISOString() }
+                );
+            } catch (recordError) {
+                console.error('Error recording scan (continuing anyway):', recordError);
+                // Continue even if recording fails
+            }
         }
 
         const runlistId = await findRunlistByScan(scan);
