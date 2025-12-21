@@ -4,7 +4,7 @@ import ImpositionViewer from '../../components/MiddlePanel/ImpositionViewer';
 import ProductionInfo from '../../components/RightPanel/ProductionInfo';
 import { ProductionQueueItem, ImpositionItem, ImpositionDetails } from '../../types';
 import { fetchProductionQueue, fetchImpositionDetails, fetchFileIds, processScan, fetchMachines, fetchOperations, Machine, Operation } from '../../services/api';
-import { Settings, ChevronDown } from 'lucide-react';
+import { Settings, ChevronDown, AlertCircle, X } from 'lucide-react';
 
 export default function TicketPage() {
     const [queue, setQueue] = useState<ProductionQueueItem[]>([]);
@@ -25,56 +25,7 @@ export default function TicketPage() {
     const [selectedMachine, setSelectedMachine] = useState<Machine | null>(null);
     const [selectedOperations, setSelectedOperations] = useState<string[]>([]); // Array of operation_ids
     const [showSettings, setShowSettings] = useState(false);
-
-    // Fetch machines on mount
-    useEffect(() => {
-        const loadMachines = async () => {
-            try {
-                const machinesData = await fetchMachines();
-                setMachines(machinesData);
-            } catch (err) {
-                console.error('Error loading machines:', err);
-            }
-        };
-        loadMachines();
-        setLoading(false);
-    }, []);
-
-    // Update operations when machine selection changes
-    useEffect(() => {
-        const loadOperations = async () => {
-            if (selectedMachine) {
-                try {
-                    const operationsData = await fetchOperations(selectedMachine.machine_id);
-                    setOperations(operationsData);
-                    // Reset operation selection - only keep operations that are still available
-                    const availableOperationIds = operationsData.map(op => op.operation_id);
-                    setSelectedOperations(prev => prev.filter(opId => availableOperationIds.includes(opId)));
-                } catch (err) {
-                    console.error('Error loading operations:', err);
-                }
-            } else {
-                setOperations([]);
-                setSelectedOperations([]);
-            }
-        };
-        loadOperations();
-    }, [selectedMachine]);
-
-    // Focus scan input on mount
-    useEffect(() => {
-        scanInputRef.current?.focus();
-    }, []);
-
-    // Fetch details when imposition is selected
-    useEffect(() => {
-        if (selectedImposition) {
-            loadImpositionDetails(selectedImposition.imposition_id);
-        } else {
-            setImpositionDetails(null);
-            setFileIds([]);
-        }
-    }, [selectedImposition]);
+    const [notification, setNotification] = useState<{ message: string; type: 'error' | 'success' } | null>(null);
 
     const loadProductionQueue = async () => {
         try {
@@ -93,6 +44,63 @@ export default function TicketPage() {
             setLoading(false);
         }
     };
+
+    // Fetch machines on mount
+    useEffect(() => {
+        const loadMachines = async () => {
+            try {
+                const machinesData = await fetchMachines();
+                setMachines(machinesData);
+            } catch (err) {
+                console.error('Error loading machines:', err);
+            }
+        };
+        loadMachines();
+    }, []);
+
+    // Load production queue on mount
+    useEffect(() => {
+        loadProductionQueue();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    // Fetch all operations on mount (no machine filtering)
+    useEffect(() => {
+        const loadOperations = async () => {
+            try {
+                const operationsData = await fetchOperations();
+                setOperations(operationsData);
+            } catch (err) {
+                console.error('Error loading operations:', err);
+            }
+        };
+        loadOperations();
+    }, []);
+
+    // Focus scan input on mount
+    useEffect(() => {
+        scanInputRef.current?.focus();
+    }, []);
+
+    // Auto-dismiss notification after 5 seconds
+    useEffect(() => {
+        if (notification) {
+            const timer = setTimeout(() => {
+                setNotification(null);
+            }, 5000);
+            return () => clearTimeout(timer);
+        }
+    }, [notification]);
+
+    // Fetch details when imposition is selected
+    useEffect(() => {
+        if (selectedImposition) {
+            loadImpositionDetails(selectedImposition.imposition_id);
+        } else {
+            setImpositionDetails(null);
+            setFileIds([]);
+        }
+    }, [selectedImposition]);
 
     const loadImpositionDetails = async (impositionId: string) => {
         try {
@@ -133,10 +141,19 @@ export default function TicketPage() {
             return;
         }
 
+        // Validate that operations are selected
+        if (selectedOperations.length === 0) {
+            setNotification({
+                message: 'Please select at least one operation before scanning',
+                type: 'error'
+            });
+            return;
+        }
+
         try {
             setIsScanning(true);
             setError(null);
-            setLoading(true);
+            setNotification(null);
 
             // Process scan and get filtered runlist (with machine and operations if selected)
             const { runlistId, queue: filteredQueue } = await processScan(
@@ -156,11 +173,26 @@ export default function TicketPage() {
             setScanInput('');
             scanInputRef.current?.focus();
         } catch (err) {
-            setError(err instanceof Error ? err.message : 'Failed to process scan');
+            const errorMessage = err instanceof Error ? err.message : 'Failed to process scan';
+            
+            // If no runlist found, show notification but keep the current queue
+            if (errorMessage.includes('No runlist found') || errorMessage.includes('No imposition')) {
+                setNotification({
+                    message: 'No runlist or imposition ID found for this scan',
+                    type: 'error'
+                });
+                // Keep the current queue visible, don't clear it
+            } else {
+                // For other errors, still show notification but don't clear queue
+                setNotification({
+                    message: errorMessage,
+                    type: 'error'
+                });
+            }
+            
             console.error('Error processing scan:', err);
         } finally {
             setIsScanning(false);
-            setLoading(false);
         }
     };
 
@@ -366,15 +398,6 @@ export default function TicketPage() {
                                                         flex: 1,
                                                     }}>
                                                         {op.operation_name}
-                                                        {op.can_run_parallel && (
-                                                            <span style={{
-                                                                fontSize: '0.75rem',
-                                                                color: 'var(--text-tertiary)',
-                                                                marginLeft: 'var(--spacing-xs)',
-                                                            }}>
-                                                                (parallel)
-                                                            </span>
-                                                        )}
                                                     </span>
                                                 </label>
                                             );
@@ -388,24 +411,83 @@ export default function TicketPage() {
 
                 {/* Scan Input */}
                 <div className="scan-input-container" style={{ padding: 'var(--spacing-md)', borderBottom: '1px solid var(--border-color)' }}>
+                    {/* Notification */}
+                    {notification && (
+                        <div
+                            style={{
+                                marginBottom: 'var(--spacing-md)',
+                                padding: 'var(--spacing-sm) var(--spacing-md)',
+                                background: notification.type === 'error' 
+                                    ? 'rgba(239, 68, 68, 0.1)' 
+                                    : 'rgba(34, 197, 94, 0.1)',
+                                border: `1px solid ${notification.type === 'error' 
+                                    ? 'rgba(239, 68, 68, 0.3)' 
+                                    : 'rgba(34, 197, 94, 0.3)'}`,
+                                borderRadius: 'var(--radius-sm)',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: 'var(--spacing-sm)',
+                                color: notification.type === 'error' 
+                                    ? 'rgb(239, 68, 68)' 
+                                    : 'rgb(34, 197, 94)',
+                                fontSize: '0.875rem',
+                            }}
+                        >
+                            <AlertCircle size={16} />
+                            <span style={{ flex: 1 }}>{notification.message}</span>
+                            <button
+                                onClick={() => setNotification(null)}
+                                style={{
+                                    background: 'transparent',
+                                    border: 'none',
+                                    color: 'inherit',
+                                    cursor: 'pointer',
+                                    padding: '2px',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                }}
+                            >
+                                <X size={14} />
+                            </button>
+                        </div>
+                    )}
                     <form onSubmit={handleScanSubmit}>
                         <input
                             ref={scanInputRef}
                             type="text"
                             value={scanInput}
                             onChange={handleScanInputChange}
-                            placeholder="Scan barcode (job_id_version_tag)..."
-                            disabled={isScanning}
+                            placeholder={selectedOperations.length === 0 
+                                ? "Select operations first..." 
+                                : "Scan barcode (job_id_version_tag or runlist)..."
+                            }
+                            disabled={isScanning || selectedOperations.length === 0}
                             style={{
                                 width: '100%',
                                 padding: 'var(--spacing-sm) var(--spacing-md)',
-                                background: 'var(--bg-tertiary)',
+                                background: selectedOperations.length === 0 
+                                    ? 'var(--bg-secondary)' 
+                                    : 'var(--bg-tertiary)',
                                 border: '1px solid var(--border-color)',
                                 borderRadius: 'var(--radius-sm)',
-                                color: 'var(--text-primary)',
+                                color: selectedOperations.length === 0 
+                                    ? 'var(--text-secondary)' 
+                                    : 'var(--text-primary)',
                                 fontSize: '0.875rem',
+                                cursor: selectedOperations.length === 0 ? 'not-allowed' : 'text',
+                                opacity: selectedOperations.length === 0 ? 0.6 : 1,
                             }}
                         />
+                        {selectedOperations.length === 0 && (
+                            <div style={{
+                                fontSize: '0.75rem',
+                                color: 'var(--text-secondary)',
+                                marginTop: 'var(--spacing-xs)',
+                                paddingLeft: 'var(--spacing-xs)',
+                            }}>
+                                Select at least one operation in Operation Settings to enable scanning
+                            </div>
+                        )}
                     </form>
                 </div>
                 <ProductionQueueList

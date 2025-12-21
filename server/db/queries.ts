@@ -146,18 +146,62 @@ export async function getFileIds(impositionId: string): Promise<string[]> {
     }
 }
 
-// Find runlist_id by scan (format: job_id_version_tag, e.g., "4604_5889_1")
-// Matches against file_id pattern: FILE_version_Labex_job_id_*
+// Find runlist_id by scan
+// First checks if scan is a direct runlist_id (exact or partial match)
+// If not found, tries to parse as job_id_version_tag format
 export async function findRunlistByScan(scanInput: string): Promise<string | null> {
     const client = await pool.connect();
     try {
+        console.log(`[findRunlistByScan] Searching for runlist with scan: "${scanInput}"`);
+        
+        // First, check if scan is a direct runlist_id match (exact or partial)
+        // Check for exact match first
+        let exactMatch = await client.query(
+            `SELECT DISTINCT runlist_id 
+             FROM production_planner_paths 
+             WHERE runlist_id = $1 
+             LIMIT 1`,
+            [scanInput]
+        );
+        
+        if (exactMatch.rows.length === 1) {
+            console.log(`[findRunlistByScan] Found exact match: ${exactMatch.rows[0].runlist_id}`);
+            return exactMatch.rows[0].runlist_id;
+        }
+        
+        // Check for partial match (runlist_id starts with or contains the scan input)
+        // This handles cases where user scans just the number part
+        // Try prefix match first (more common case)
+        let partialMatch = await client.query(
+            `SELECT DISTINCT runlist_id 
+             FROM production_planner_paths 
+             WHERE (runlist_id LIKE $1 OR runlist_id LIKE $2)
+             AND runlist_id IS NOT NULL
+             ORDER BY runlist_id`,
+            [`${scanInput}%`, `%${scanInput}%`]
+        );
+        
+        console.log(`[findRunlistByScan] Partial match found ${partialMatch.rows.length} results`);
+        if (partialMatch.rows.length > 0) {
+            console.log(`[findRunlistByScan] Matches:`, partialMatch.rows.map(r => r.runlist_id));
+        }
+        
+        if (partialMatch.rows.length === 1) {
+            // One match found - return it
+            console.log(`[findRunlistByScan] Returning single match: ${partialMatch.rows[0].runlist_id}`);
+            return partialMatch.rows[0].runlist_id;
+        } else if (partialMatch.rows.length > 1) {
+            // Multiple matches - return null (caller should handle error)
+            console.log(`[findRunlistByScan] Multiple matches found, returning null`);
+            return null;
+        }
+        
+        // If no direct runlist match, try parsing as job_id_version_tag format
         // Parse scan input: format is "job_id_version_tag" (e.g., "4604_5889_1")
-        // Split by underscore to get parts
         const parts = scanInput.split('_');
         
         if (parts.length < 3) {
-            // Try to extract version (last part) and job_id (first parts)
-            // For format like "4604_5889_1", we want version=1, job_id="4604_5889"
+            // Not enough parts for job_id_version_tag format
             return null;
         }
         

@@ -4,7 +4,7 @@ export type JobStatus = 'pending' | 'started' | 'completed';
 export type JobStatusCategory = 'print_ready' | 'printed' | 'digital_cut' | 'slitter' | 'production_finished';
 
 // Group by rules
-export type GroupByRule = 'material' | 'finishing' | 'material_finishing';
+export type GroupByRule = 'material' | 'finishing' | 'material_finishing' | 'runlist';
 
 // Sort by rules
 export type SortByRule = 'due_date' | 'created_at' | 'job_code';
@@ -39,6 +39,13 @@ export interface Job {
   material?: string;
   finishing?: string;
   operations?: JobOperations;
+  // Grouped job fields (from job_operations)
+  totalVersions?: number;
+  completedVersions?: number;
+  versionTags?: string[];
+  currentStatus?: string; // 'print_ready' | 'printed' | 'digital_cut' | 'slitter' | 'production_finished'
+  maxCompletedSequence?: number;
+  runlistId?: string | null; // Runlist ID for grouping
 }
 
 export interface Roll {

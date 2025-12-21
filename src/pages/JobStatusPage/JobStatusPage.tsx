@@ -1,115 +1,94 @@
-import { useState } from 'react';
-import { Activity, Printer, Scissors, Cut, CheckCircle2 } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { Activity, Settings, X } from 'lucide-react';
 import { Job, JobStatusCardConfig } from '../../types';
 import JobStatusCard from '../../components/JobStatusCard/JobStatusCard';
+import { fetchJobs, JobFilterOptions } from '../../services/api';
 import './JobStatusPage.css';
 
-// Mock data - will be replaced with API calls later
-const mockJobs: Job[] = [
-    {
-        id: '1',
-        jobCode: 'JOB-2025-001',
-        rollId: 'ROLL-001',
-        orderId: 'ORD-12345',
-        ticketId: 'TKT-67890',
-        versionTag: 'v2.1',
-        versionQty: 500,
-        pdfPath: '/pdfs/job-001.pdf',
-        status: 'pending',
-        dueDate: '2025-12-15T10:00:00Z',
-        comments: 'Premium glossy finish required',
-        qtyExplanation: 'Original order: 500 units',
-        positionInRoll: 1,
-        createdAt: '2025-12-10T08:00:00Z',
-        material: 'Glossy Paper',
-        finishing: 'Lamination',
-        operations: {},
-    },
-    {
-        id: '2',
-        jobCode: 'JOB-2025-002',
-        rollId: 'ROLL-001',
-        orderId: 'ORD-12346',
-        ticketId: 'TKT-67891',
-        versionTag: 'v1.0',
-        versionQty: 1000,
-        pdfPath: '/pdfs/job-002.pdf',
-        status: 'started',
-        dueDate: '2025-12-16T14:00:00Z',
-        comments: 'Standard matte finish',
-        qtyExplanation: 'Printing 1050 units total',
-        positionInRoll: 2,
-        createdAt: '2025-12-10T08:05:00Z',
-        startedAt: '2025-12-12T10:30:00Z',
-        material: 'Matte Paper',
-        finishing: 'UV Coating',
-        operations: { print: true },
-    },
-    {
-        id: '3',
-        jobCode: 'JOB-2025-003',
-        rollId: 'ROLL-002',
-        orderId: 'ORD-12347',
-        ticketId: 'TKT-67892',
-        versionTag: 'v1.5',
-        versionQty: 750,
-        pdfPath: '/pdfs/job-003.pdf',
-        status: 'started',
-        dueDate: '2025-12-17T09:00:00Z',
-        comments: 'Premium finish',
-        qtyExplanation: '750 units',
-        positionInRoll: 1,
-        createdAt: '2025-12-11T08:00:00Z',
-        startedAt: '2025-12-13T09:00:00Z',
-        material: 'Glossy Paper',
-        finishing: 'Lamination',
-        operations: { print: true, coating: true },
-    },
-    {
-        id: '4',
-        jobCode: 'JOB-2025-004',
-        rollId: 'ROLL-002',
-        orderId: 'ORD-12348',
-        ticketId: 'TKT-67893',
-        versionTag: 'v2.0',
-        versionQty: 600,
-        pdfPath: '/pdfs/job-004.pdf',
-        status: 'started',
-        dueDate: '2025-12-18T11:00:00Z',
-        comments: 'Standard finish',
-        qtyExplanation: '600 units',
-        positionInRoll: 2,
-        createdAt: '2025-12-11T08:10:00Z',
-        startedAt: '2025-12-13T10:00:00Z',
-        material: 'Matte Paper',
-        finishing: 'UV Coating',
-        operations: { print: true, coating: true, kiss_cut: true, backscore: true },
-    },
-    {
-        id: '5',
-        jobCode: 'JOB-2025-005',
-        rollId: 'ROLL-003',
-        orderId: 'ORD-12349',
-        ticketId: 'TKT-67894',
-        versionTag: 'v1.0',
-        versionQty: 1200,
-        pdfPath: '/pdfs/job-005.pdf',
-        status: 'completed',
-        dueDate: '2025-12-14T15:00:00Z',
-        comments: 'All operations complete',
-        qtyExplanation: '1200 units',
-        positionInRoll: 1,
-        createdAt: '2025-12-09T08:00:00Z',
-        startedAt: '2025-12-10T09:00:00Z',
-        completedAt: '2025-12-12T16:00:00Z',
-        material: 'Glossy Paper',
-        finishing: 'Lamination',
-        operations: { print: true, coating: true, kiss_cut: true, backscore: true, slitter: true },
-    },
-];
+// Map database job to frontend Job interface
+function mapDbJobToJob(dbJob: any): Job {
+    // Map status from backend status to frontend status
+    const statusMap: Record<string, 'pending' | 'started' | 'completed'> = {
+        'print_ready': 'pending',
+        'printed': 'started',
+        'digital_cut': 'started',
+        'slitter': 'started',
+        'production_finished': 'completed',
+    };
+
+    return {
+        id: dbJob.job_id?.toString() || '',
+        jobCode: dbJob.job_id?.toString() || 'N/A',
+        rollId: '',
+        orderId: '',
+        ticketId: '',
+        versionTag: '', // Not used when grouped
+        versionQty: dbJob.total_versions || 0,
+        pdfPath: '',
+        status: statusMap[dbJob.status] || 'pending',
+        dueDate: dbJob.updated_at || dbJob.created_at || new Date().toISOString(),
+        comments: '',
+        qtyExplanation: `${dbJob.completed_versions || 0} of ${dbJob.total_versions || 0} versions completed`,
+        positionInRoll: 0,
+        createdAt: dbJob.created_at || new Date().toISOString(),
+        startedAt: undefined,
+        completedAt: dbJob.updated_at || undefined,
+        material: '',
+        finishing: '',
+        operations: {}, // Not used when grouped
+        // Additional fields for grouped display
+        totalVersions: dbJob.total_versions || 0,
+        completedVersions: dbJob.completed_versions || 0,
+        versionTags: dbJob.version_tags || [],
+        currentStatus: dbJob.status || 'print_ready', // Use status from database view
+        maxCompletedSequence: dbJob.max_completed_sequence || 0,
+        runlistId: dbJob.runlist_id || null, // Runlist ID for grouping
+    };
+}
 
 export default function JobStatusPage() {
-    const [jobs] = useState<Job[]>(mockJobs);
+    const [jobs, setJobs] = useState<Job[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+    const [showFilters, setShowFilters] = useState(false);
+    const [limit, setLimit] = useState<number>(500); // Increased limit to show more jobs across all statuses
+    const [filters, setFilters] = useState<JobFilterOptions>({
+        // No default filters - querying from job_operations
+        limit: 500, // Request more jobs to ensure all statuses are represented
+    });
+
+    // Load jobs from API
+    useEffect(() => {
+        loadJobs();
+    }, [filters, limit]);
+
+    async function loadJobs() {
+        setLoading(true);
+        setError(null);
+        try {
+            // Request all jobs (or a large limit) so we can see all statuses
+            const dbJobs = await fetchJobs({ ...filters, limit: limit || 500 });
+            console.log('Raw jobs from API (first 5):', dbJobs.slice(0, 5).map(j => ({ 
+                job_id: j.job_id, 
+                status: j.status, 
+                max_completed_sequence: j.max_completed_sequence 
+            }))); // Debug: log first 5 jobs
+            const mappedJobs = dbJobs.map(mapDbJobToJob);
+            // Debug: Log status distribution
+            const statusCounts = mappedJobs.reduce((acc, job) => {
+                const status = job.currentStatus || 'unknown';
+                acc[status] = (acc[status] || 0) + 1;
+                return acc;
+            }, {} as Record<string, number>);
+            console.log('Job status distribution:', statusCounts);
+            setJobs(mappedJobs);
+        } catch (err) {
+            console.error('Error loading jobs:', err);
+            setError(err instanceof Error ? err.message : 'Failed to load jobs');
+        } finally {
+            setLoading(false);
+        }
+    }
 
     // Define status card configurations
     const statusCardConfigs: JobStatusCardConfig[] = [
@@ -119,11 +98,9 @@ export default function JobStatusPage() {
             description: 'All jobs without any status yet',
             icon: 'Printer',
             filterRule: (job: Job) => {
-                // No operations completed
-                return !job.operations || Object.keys(job.operations).length === 0 || 
-                       Object.values(job.operations).every(op => !op);
+                return job.currentStatus === 'print_ready';
             },
-            groupBy: 'material',
+            groupBy: 'runlist',
             sortBy: 'due_date',
         },
         {
@@ -132,10 +109,9 @@ export default function JobStatusPage() {
             description: 'Print operation completed',
             icon: 'Printer',
             filterRule: (job: Job) => {
-                return job.operations?.print === true && 
-                       (!job.operations?.coating || job.operations.coating === false);
+                return job.currentStatus === 'printed';
             },
-            groupBy: 'material_finishing',
+            groupBy: 'runlist',
             sortBy: 'due_date',
         },
         {
@@ -144,23 +120,20 @@ export default function JobStatusPage() {
             description: 'Coating operation completed',
             icon: 'Scissors',
             filterRule: (job: Job) => {
-                return job.operations?.coating === true && 
-                       (!job.operations?.kiss_cut || job.operations.kiss_cut === false);
+                return job.currentStatus === 'digital_cut';
             },
-            groupBy: 'material_finishing',
+            groupBy: 'runlist',
             sortBy: 'due_date',
         },
         {
             status: 'slitter',
             title: 'Slitter',
             description: 'Kiss cut and backscore done, slitter pending',
-            icon: 'Cut',
+            icon: 'Minus',
             filterRule: (job: Job) => {
-                return job.operations?.kiss_cut === true && 
-                       job.operations?.backscore === true &&
-                       (!job.operations?.slitter || job.operations.slitter === false);
+                return job.currentStatus === 'slitter';
             },
-            groupBy: 'material_finishing',
+            groupBy: 'runlist',
             sortBy: 'due_date',
         },
         {
@@ -169,13 +142,9 @@ export default function JobStatusPage() {
             description: 'All operations completed',
             icon: 'CheckCircle2',
             filterRule: (job: Job) => {
-                return job.operations?.print === true &&
-                       job.operations?.coating === true &&
-                       job.operations?.kiss_cut === true &&
-                       job.operations?.backscore === true &&
-                       job.operations?.slitter === true;
+                return job.currentStatus === 'production_finished';
             },
-            groupBy: 'material_finishing',
+            groupBy: 'runlist',
             sortBy: 'due_date',
         },
     ];
@@ -187,18 +156,156 @@ export default function JobStatusPage() {
                     <Activity size={24} />
                     <h2>Job Status Overview</h2>
                 </div>
+                <button 
+                    className="filter-toggle-btn"
+                    onClick={() => setShowFilters(!showFilters)}
+                >
+                    <Settings size={18} />
+                    Filters
+                </button>
             </div>
 
-            <div className="job-status-content">
-                <div className="job-status-grid">
-                    {statusCardConfigs.map((config) => (
-                        <JobStatusCard
-                            key={config.status}
-                            config={config}
-                            jobs={jobs}
-                        />
-                    ))}
+            {showFilters && (
+                <div className="filter-panel">
+                    <div className="filter-panel-header">
+                        <h3>Filter Jobs</h3>
+                        <button 
+                            className="close-filter-btn"
+                            onClick={() => setShowFilters(false)}
+                        >
+                            <X size={18} />
+                        </button>
+                    </div>
+                    <div className="filter-options">
+                        <div className="filter-group">
+                            <label>Status:</label>
+                            <select
+                                value={filters.status || ''}
+                                onChange={(e) => setFilters({ ...filters, status: e.target.value || undefined })}
+                            >
+                                <option value="">All Statuses</option>
+                                <option value="pending">Pending</option>
+                                <option value="started">Started</option>
+                                <option value="completed">Completed</option>
+                            </select>
+                        </div>
+
+                        <div className="filter-group">
+                            <label>Material:</label>
+                            <input
+                                type="text"
+                                placeholder="Filter by material"
+                                value={filters.material || ''}
+                                onChange={(e) => setFilters({ ...filters, material: e.target.value || undefined })}
+                            />
+                        </div>
+
+                        <div className="filter-group">
+                            <label>Finishing:</label>
+                            <input
+                                type="text"
+                                placeholder="Filter by finishing"
+                                value={filters.finishing || ''}
+                                onChange={(e) => setFilters({ ...filters, finishing: e.target.value || undefined })}
+                            />
+                        </div>
+
+                        <div className="filter-group">
+                            <label>Limit Results:</label>
+                            <select
+                                value={limit}
+                                onChange={(e) => setLimit(parseInt(e.target.value, 10))}
+                            >
+                                <option value={50}>50 jobs</option>
+                                <option value={100}>100 jobs</option>
+                                <option value={200}>200 jobs</option>
+                            </select>
+                        </div>
+
+                        <div className="filter-group">
+                            <label>Operations:</label>
+                            <div className="filter-checkboxes">
+                                <label className="filter-checkbox">
+                                    <input
+                                        type="checkbox"
+                                        checked={filters.hasPrint || false}
+                                        onChange={(e) => setFilters({ ...filters, hasPrint: e.target.checked ? true : undefined })}
+                                    />
+                                    <span>Has Print</span>
+                                </label>
+                                <label className="filter-checkbox">
+                                    <input
+                                        type="checkbox"
+                                        checked={filters.hasCoating || false}
+                                        onChange={(e) => setFilters({ ...filters, hasCoating: e.target.checked ? true : undefined })}
+                                    />
+                                    <span>Has Coating</span>
+                                </label>
+                                <label className="filter-checkbox">
+                                    <input
+                                        type="checkbox"
+                                        checked={filters.hasKissCut || false}
+                                        onChange={(e) => setFilters({ ...filters, hasKissCut: e.target.checked ? true : undefined })}
+                                    />
+                                    <span>Has Kiss Cut</span>
+                                </label>
+                                <label className="filter-checkbox">
+                                    <input
+                                        type="checkbox"
+                                        checked={filters.hasBackscore || false}
+                                        onChange={(e) => setFilters({ ...filters, hasBackscore: e.target.checked ? true : undefined })}
+                                    />
+                                    <span>Has Backscore</span>
+                                </label>
+                                <label className="filter-checkbox">
+                                    <input
+                                        type="checkbox"
+                                        checked={filters.hasSlitter || false}
+                                        onChange={(e) => setFilters({ ...filters, hasSlitter: e.target.checked ? true : undefined })}
+                                    />
+                                    <span>Has Slitter</span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <div className="filter-actions">
+                            <button 
+                                className="clear-filters-btn"
+                                onClick={() => {
+                                    setFilters({}); // Reset filters
+                                    setLimit(100);
+                                }}
+                            >
+                                Reset Filters
+                            </button>
+                        </div>
+                    </div>
                 </div>
+            )}
+
+            <div className="job-status-content">
+                {loading && (
+                    <div className="loading-state">
+                        <p>Loading jobs...</p>
+                    </div>
+                )}
+                {error && (
+                    <div className="error-state">
+                        <p>Error: {error}</p>
+                        <button onClick={loadJobs}>Retry</button>
+                    </div>
+                )}
+                {!loading && !error && (
+                    <div className="job-status-grid">
+                        {statusCardConfigs.map((config) => (
+                            <JobStatusCard
+                                key={config.status}
+                                config={config}
+                                jobs={jobs}
+                            />
+                        ))}
+                    </div>
+                )}
             </div>
         </div>
     );

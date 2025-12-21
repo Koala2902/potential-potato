@@ -56,17 +56,13 @@ export async function fetchMachines(): Promise<Machine[]> {
 export interface Operation {
     operation_id: string;
     operation_name: string;
-    machine_id: string;
-    operation_category: string;
-    can_run_parallel: boolean;
-    requires_operator: boolean;
-    setup_time_base_minutes: number | null;
+    description?: string;
+    created_at?: string;
 }
 
-export async function fetchOperations(machineId?: string | null): Promise<Operation[]> {
-    const url = machineId 
-        ? `${API_BASE_URL}/operations?machineId=${encodeURIComponent(machineId)}`
-        : `${API_BASE_URL}/operations`;
+export async function fetchOperations(_machineId?: string | null): Promise<Operation[]> {
+    // machineId parameter is ignored - all operations are returned
+    const url = `${API_BASE_URL}/operations`;
     const response = await fetch(url);
     if (!response.ok) {
         throw new Error('Failed to fetch operations');
@@ -95,6 +91,43 @@ export async function processScan(
             throw new Error('No runlist found for this scan');
         }
         throw new Error('Failed to process scan');
+    }
+    return response.json();
+}
+
+export interface JobFilterOptions {
+    status?: string;
+    material?: string;
+    finishing?: string;
+    hasPrint?: boolean;
+    hasCoating?: boolean;
+    hasKissCut?: boolean;
+    hasBackscore?: boolean;
+    hasSlitter?: boolean;
+    dateFrom?: string;
+    dateTo?: string;
+    limit?: number;
+}
+
+export async function fetchJobs(filters?: JobFilterOptions): Promise<any[]> {
+    const params = new URLSearchParams();
+    
+    if (filters?.status) params.append('status', filters.status);
+    if (filters?.material) params.append('material', filters.material);
+    if (filters?.finishing) params.append('finishing', filters.finishing);
+    if (filters?.hasPrint) params.append('hasPrint', 'true');
+    if (filters?.hasCoating) params.append('hasCoating', 'true');
+    if (filters?.hasKissCut) params.append('hasKissCut', 'true');
+    if (filters?.hasBackscore) params.append('hasBackscore', 'true');
+    if (filters?.hasSlitter) params.append('hasSlitter', 'true');
+    if (filters?.dateFrom) params.append('dateFrom', filters.dateFrom);
+    if (filters?.dateTo) params.append('dateTo', filters.dateTo);
+    if (filters?.limit) params.append('limit', filters.limit.toString());
+
+    const url = `${API_BASE_URL}/jobs${params.toString() ? `?${params.toString()}` : ''}`;
+    const response = await fetch(url);
+    if (!response.ok) {
+        throw new Error('Failed to fetch jobs');
     }
     return response.json();
 }

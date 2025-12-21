@@ -2,7 +2,9 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { getProductionQueue, getImpositionDetails, getFileIds, findRunlistByScan, getProductionQueueByRunlist } from './db/queries.js';
-import { getMachines, getAvailableOperations, recordScannedCode } from './db/jobmanager-queries.js';
+import { getMachines, getAvailableOperations, recordScannedCode, recordRunlistScans, getJobs } from './db/jobmanager-queries.js';
+import { processPrintOSRecords, processScannedCodes } from './db/status-updates.js';
+import pool from './db/connection.js';
 
 dotenv.config();
 
@@ -30,7 +32,8 @@ app.get('/', (req, res) => {
             machines: '/api/machines',
             operations: '/api/operations?machineId=:machineId',
             scan: '/api/scan (POST)',
-            scannedCodes: '/api/scanned-codes (POST)'
+            scannedCodes: '/api/scanned-codes (POST)',
+            jobs: '/api/jobs?status=print_ready&limit=100'
         },
         port: PORT,
         database: process.env.DB_NAME || 'logs'
@@ -114,10 +117,59 @@ app.post('/api/scanned-codes', async (req, res) => {
             metadata || null
         );
         
+        // Process the scan immediately (async, don't wait)
+        processScannedCodes().catch(err => {
+            console.error('Error processing scanned codes after new scan:', err);
+        });
+        
         res.json(scannedCode);
     } catch (error) {
         console.error('Error recording scanned code:', error);
         res.status(500).json({ error: 'Failed to record scanned code' });
+    }
+});
+
+// Get jobs from jobmanager database with optional filters
+app.get('/api/jobs', async (req, res) => {
+    try {
+        const {
+            status,
+            material,
+            finishing,
+            hasPrint,
+            hasCoating,
+            hasKissCut,
+            hasBackscore,
+            hasSlitter,
+            dateFrom,
+            dateTo,
+            limit
+        } = req.query;
+
+        const filters: any = {};
+        
+        if (status) filters.status = status as string;
+        if (material) filters.material = material as string;
+        if (finishing) filters.finishing = finishing as string;
+        if (hasPrint === 'true') filters.hasPrint = true;
+        if (hasCoating === 'true') filters.hasCoating = true;
+        if (hasKissCut === 'true') filters.hasKissCut = true;
+        if (hasBackscore === 'true') filters.hasBackscore = true;
+        if (hasSlitter === 'true') filters.hasSlitter = true;
+        if (dateFrom) filters.dateFrom = dateFrom as string;
+        if (dateTo) filters.dateTo = dateTo as string;
+        if (limit) {
+            const limitNum = parseInt(limit as string, 10);
+            if (!isNaN(limitNum) && limitNum > 0) {
+                filters.limit = limitNum;
+            }
+        }
+
+        const jobs = await getJobs(filters);
+        res.json(jobs);
+    } catch (error) {
+        console.error('Error fetching jobs:', error);
+        res.status(500).json({ error: 'Failed to fetch jobs' });
     }
 });
 
@@ -131,37 +183,234 @@ app.post('/api/scan', async (req, res) => {
             return res.status(400).json({ error: 'Scan input is required' });
         }
 
-        // Record scan to scanned_codes if machineId and operations are provided
-        if (machineId && operations && Array.isArray(operations) && operations.length > 0) {
+        console.log(`[POST /api/scan] Processing scan: "${scan}"`);
+        console.log(`[POST /api/scan] Request body - machineId: ${machineId}, operations: ${JSON.stringify(operations)}, userId: ${userId}`);
+        const runlistId = await findRunlistByScan(scan);
+        
+        // Get individual file IDs for this runlist (for display purposes)
+        let individualFileIds: any[] = [];
+        if (runlistId) {
             try {
-                await recordScannedCode(
-                    scan,
-                    machineId,
-                    userId || null,
-                    { operations },
-                    { timestamp: new Date().toISOString() }
-                );
+                const client = await pool.connect();
+                try {
+                    const fileIdsResult = await client.query(`
+                        SELECT DISTINCT ifm.file_id
+                        FROM imposition_file_mapping ifm
+                        INNER JOIN production_planner_paths ppp ON ifm.imposition_id = ppp.imposition_id
+                        WHERE ppp.runlist_id = $1
+                        ORDER BY ifm.file_id
+                    `, [runlistId]);
+                    
+                    // Parse file_ids to get simplified job_id_version_tag format
+                    for (const row of fileIdsResult.rows) {
+                        const fileId = row.file_id;
+                        // Simple parsing - extract job_id and version_tag
+                        const match = fileId.match(/^FILE_(\d+)_Labex_(.+)$/);
+                        if (match) {
+                            const versionTag = match[1];
+                            const afterLabex = match[2];
+                            const parts = afterLabex.split('_');
+                            if (parts.length >= 2) {
+                                const numericParts: string[] = [];
+                                for (const part of parts) {
+                                    if (/^\d+$/.test(part)) {
+                                        numericParts.push(part);
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                if (numericParts.length >= 2) {
+                                    const jobId = numericParts.join('_');
+                                    individualFileIds.push({
+                                        file_id: fileId,
+                                        code_text: `${jobId}_${versionTag}`,
+                                        job_id: jobId,
+                                        version_tag: versionTag
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    console.log(`[POST /api/scan] Found ${individualFileIds.length} individual file_ids in runlist`);
+                } finally {
+                    client.release();
+                }
+            } catch (err) {
+                console.error('Error getting individual file IDs:', err);
+            }
+        }
+        
+        // Record scan to scanned_codes if machineId and operations are provided
+        let recordedScans: any[] = [];
+        if (machineId && operations && Array.isArray(operations) && operations.length > 0) {
+            console.log(`[POST /api/scan] machineId and operations provided, will record scans`);
+            try {
+                if (runlistId) {
+                    // If it's a runlist scan, record individual file_id scans
+                    console.log(`[POST /api/scan] Detected runlist ${runlistId}, recording scans for all file_ids`);
+                    const scans = await recordRunlistScans(
+                        runlistId,
+                        machineId,
+                        userId || null,
+                        { operations },
+                        { timestamp: new Date().toISOString() }
+                    );
+                    recordedScans = scans.map(s => ({
+                        scan_id: s.scan_id,
+                        code_text: s.code_text,
+                        scanned_at: s.scanned_at
+                    }));
+                    console.log(`[POST /api/scan] Recorded ${recordedScans.length} individual file_id scans`);
+                } else {
+                    // Regular scan (file_id or job_id_version_tag), record as-is
+                    const scannedCode = await recordScannedCode(
+                        scan,
+                        machineId,
+                        userId || null,
+                        { operations },
+                        { timestamp: new Date().toISOString() }
+                    );
+                    recordedScans = [{
+                        scan_id: scannedCode.scan_id,
+                        code_text: scannedCode.code_text,
+                        scanned_at: scannedCode.scanned_at
+                    }];
+                }
+                
+                // Process the scan immediately (async, don't wait)
+                processScannedCodes().catch(err => {
+                    console.error('Error processing scanned codes after new scan:', err);
+                });
             } catch (recordError) {
                 console.error('Error recording scan (continuing anyway):', recordError);
                 // Continue even if recording fails
             }
+        } else {
+            console.log(`[POST /api/scan] Skipping scan recording - machineId: ${machineId}, operations: ${JSON.stringify(operations)}`);
         }
-
-        const runlistId = await findRunlistByScan(scan);
         if (!runlistId) {
-            return res.status(404).json({ error: 'No runlist found for this scan' });
+            // Check if multiple runlists matched (partial match returned null)
+            const client = await pool.connect();
+            try {
+                const multipleMatch = await client.query(
+                    `SELECT DISTINCT runlist_id 
+                     FROM production_planner_paths 
+                     WHERE (runlist_id LIKE $1 OR runlist_id LIKE $2)
+                     AND runlist_id IS NOT NULL`,
+                    [`${scan}%`, `%${scan}%`]
+                );
+                
+                console.log(`[POST /api/scan] Multiple match check: ${multipleMatch.rows.length} results`);
+                
+                if (multipleMatch.rows.length > 1) {
+                    console.log(`[POST /api/scan] Multiple matches found:`, multipleMatch.rows.map(r => r.runlist_id));
+                    return res.status(400).json({ 
+                        error: `Multiple runlists found matching "${scan}". Please scan the full runlist ID.`,
+                        matches: multipleMatch.rows.map(r => r.runlist_id)
+                    });
+                } else if (multipleMatch.rows.length === 1) {
+                    // This shouldn't happen, but handle it just in case
+                    console.log(`[POST /api/scan] Found single match in error check: ${multipleMatch.rows[0].runlist_id}`);
+                    const queue = await getProductionQueueByRunlist(multipleMatch.rows[0].runlist_id);
+                    return res.json({ 
+                        runlistId: multipleMatch.rows[0].runlist_id, 
+                        queue,
+                        recordedScans: recordedScans.length > 0 ? recordedScans : undefined
+                    });
+                }
+            } finally {
+                client.release();
+            }
+            
+            console.log(`[POST /api/scan] No runlist found for scan: "${scan}"`);
+            return res.status(404).json({ error: `No runlist found for scan: "${scan}"` });
         }
+        
+        console.log(`[POST /api/scan] Found runlist: ${runlistId}`);
 
         // Get production queue filtered by this runlist
         const queue = await getProductionQueueByRunlist(runlistId);
-        res.json({ runlistId, queue });
+        res.json({ 
+            runlistId, 
+            queue,
+            recordedScans: recordedScans.length > 0 ? recordedScans : undefined
+        });
     } catch (error) {
         console.error('Error processing scan:', error);
         res.status(500).json({ error: 'Failed to process scan' });
     }
 });
 
+// Manual trigger for processing status updates
+app.post('/api/process-status-updates', async (req, res) => {
+    try {
+        const { source } = req.body; // 'both', 'print_os', or 'scanner'
+        
+        const results: any = {
+            timestamp: new Date().toISOString(),
+        };
+
+        if (!source || source === 'both' || source === 'print_os') {
+            console.log('Processing Print OS records...');
+            const printOSResult = await processPrintOSRecords();
+            results.print_os = printOSResult;
+        }
+
+        if (!source || source === 'both' || source === 'scanner') {
+            console.log('Processing scanned codes...');
+            const scannerResult = await processScannedCodes();
+            results.scanner = scannerResult;
+        }
+
+        res.json({
+            success: true,
+            results,
+        });
+    } catch (error) {
+        console.error('Error processing status updates:', error);
+        res.status(500).json({ 
+            success: false,
+            error: 'Failed to process status updates',
+            message: error instanceof Error ? error.message : 'Unknown error'
+        });
+    }
+});
+
+// Start scheduled processing (every 15 minutes)
+let processingInterval: NodeJS.Timeout | null = null;
+
+async function runProcessing() {
+    console.log('\n[PROCESSING] Starting status update processing...');
+    try {
+        const printOSResult = await processPrintOSRecords();
+        console.log(`[PROCESSING] Print OS: processed ${printOSResult.processed}, updated ${printOSResult.jobsUpdated} jobs`);
+        
+        const scannerResult = await processScannedCodes();
+        console.log(`[PROCESSING] Scanner: processed ${scannerResult.processed}, updated ${scannerResult.jobsUpdated} jobs`);
+        
+        console.log('[PROCESSING] Processing completed\n');
+    } catch (error) {
+        console.error('[PROCESSING] Error during processing:', error);
+    }
+}
+
+function startScheduledProcessing() {
+    // Run immediately on startup
+    runProcessing();
+    
+    // Clear any existing interval
+    if (processingInterval) {
+        clearInterval(processingInterval);
+    }
+
+    // Process every 15 minutes (900000 ms)
+    processingInterval = setInterval(runProcessing, 15 * 60 * 1000); // 15 minutes
+
+    console.log('✅ Scheduled processing started (runs immediately, then every 15 minutes)');
+}
+
 app.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);
+    startScheduledProcessing();
 });
 
