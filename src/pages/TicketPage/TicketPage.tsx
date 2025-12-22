@@ -1,10 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import ProductionQueueList from '../../components/LeftPanel/ProductionQueueList';
 import ImpositionViewer from '../../components/MiddlePanel/ImpositionViewer';
-import ProductionInfo from '../../components/RightPanel/ProductionInfo';
 import { ProductionQueueItem, ImpositionItem, ImpositionDetails } from '../../types';
 import { fetchProductionQueue, fetchImpositionDetails, fetchFileIds, processScan, fetchMachines, fetchOperations, Machine, Operation } from '../../services/api';
-import { Settings, ChevronDown, AlertCircle, X } from 'lucide-react';
+import { Settings, ChevronDown, AlertCircle, X, Package, Hash, FileText } from 'lucide-react';
 
 export default function TicketPage() {
     const [queue, setQueue] = useState<ProductionQueueItem[]>([]);
@@ -16,6 +15,7 @@ export default function TicketPage() {
     const [error, setError] = useState<string | null>(null);
     const [scanInput, setScanInput] = useState<string>('');
     const [isScanning, setIsScanning] = useState(false);
+    const [hasScanned, setHasScanned] = useState(false); // Track if any job has been scanned
     const scanInputRef = useRef<HTMLInputElement>(null);
     
     // Machine and operation selection
@@ -24,7 +24,7 @@ export default function TicketPage() {
     const [selectedMachineId, setSelectedMachineId] = useState<string>('');
     const [selectedMachine, setSelectedMachine] = useState<Machine | null>(null);
     const [selectedOperations, setSelectedOperations] = useState<string[]>([]); // Array of operation_ids
-    const [showSettings, setShowSettings] = useState(false);
+    const [showSettings, setShowSettings] = useState(true); // Start expanded
     const [notification, setNotification] = useState<{ message: string; type: 'error' | 'success' } | null>(null);
 
     const loadProductionQueue = async () => {
@@ -50,6 +50,7 @@ export default function TicketPage() {
         const loadMachines = async () => {
             try {
                 const machinesData = await fetchMachines();
+                console.log('Loaded machines:', machinesData);
                 setMachines(machinesData);
             } catch (err) {
                 console.error('Error loading machines:', err);
@@ -156,17 +157,32 @@ export default function TicketPage() {
             setNotification(null);
 
             // Process scan and get filtered runlist (with machine and operations if selected)
-            const { runlistId, queue: filteredQueue } = await processScan(
+            const { runlistId, queue: filteredQueue, scannedImpositionId } = await processScan(
                 scanInput.trim(),
                 selectedMachineId || null,
                 selectedOperations.length > 0 ? selectedOperations : null
             );
             
             setQueue(filteredQueue);
+            setHasScanned(true); // Mark that a scan has occurred
             
             // Expand the runlist automatically
             if (filteredQueue.length > 0) {
                 setExpandedRunlists(new Set([runlistId]));
+                
+                // Auto-select the scanned imposition if provided, otherwise first one
+                if (scannedImpositionId && filteredQueue[0]?.impositions) {
+                    const scannedImposition = filteredQueue[0].impositions.find(
+                        imp => imp.imposition_id === scannedImpositionId
+                    );
+                    if (scannedImposition) {
+                        setSelectedImposition(scannedImposition);
+                    } else if (filteredQueue[0].impositions.length > 0) {
+                        setSelectedImposition(filteredQueue[0].impositions[0]);
+                    }
+                } else if (filteredQueue[0]?.impositions && filteredQueue[0].impositions.length > 0) {
+                    setSelectedImposition(filteredQueue[0].impositions[0]);
+                }
             }
 
             // Clear scan input
@@ -282,10 +298,15 @@ export default function TicketPage() {
                                 <select
                                     value={selectedMachineId}
                                     onChange={(e) => {
+                                        console.log('Machine selected:', e.target.value);
                                         const machineId = e.target.value;
                                         setSelectedMachineId(machineId);
                                         const machine = machines.find(m => m.machine_id === machineId) || null;
                                         setSelectedMachine(machine);
+                                    }}
+                                    onClick={(e) => {
+                                        console.log('Select clicked');
+                                        e.stopPropagation();
                                     }}
                                     style={{
                                         width: '100%',
@@ -296,9 +317,12 @@ export default function TicketPage() {
                                         color: 'var(--text-primary)',
                                         fontSize: '0.875rem',
                                         cursor: 'pointer',
+                                        position: 'relative',
+                                        zIndex: 10,
+                                        pointerEvents: 'auto',
                                     }}
                                 >
-                                    <option value="">Select Machine</option>
+                                    <option value="">Select Machine ({machines.length} available)</option>
                                     {machines.map((machine) => (
                                         <option key={machine.machine_id} value={machine.machine_id}>
                                             {machine.machine_name} ({machine.machine_type})
@@ -490,16 +514,19 @@ export default function TicketPage() {
                         )}
                     </form>
                 </div>
-                <ProductionQueueList
-                    queue={queue}
-                    selectedImpositionId={selectedImposition?.imposition_id || null}
-                    onSelectImposition={handleSelectImposition}
-                    expandedRunlists={expandedRunlists}
-                    onToggleRunlist={handleToggleRunlist}
-                />
+                {/* Only show production queue if a job has been scanned */}
+                {hasScanned && (
+                    <ProductionQueueList
+                        queue={queue}
+                        selectedImpositionId={selectedImposition?.imposition_id || null}
+                        onSelectImposition={handleSelectImposition}
+                        expandedRunlists={expandedRunlists}
+                        onToggleRunlist={handleToggleRunlist}
+                    />
+                )}
             </div>
 
-            <div className="middle-panel">
+            <div className="middle-panel" style={{ flex: 1 }}>
                 <ImpositionViewer
                     imposition={selectedImposition}
                     details={impositionDetails}
@@ -507,8 +534,155 @@ export default function TicketPage() {
                 />
             </div>
 
-            <div className="right-panel">
-                <ProductionInfo job={null} />
+            {/* Right Panel - Imposition Details */}
+            <div className="right-panel" style={{
+                background: 'var(--bg-tertiary)',
+                borderLeft: '1px solid var(--border-color)',
+                padding: 'var(--spacing-md)',
+                overflowY: 'auto',
+            }}>
+                {selectedImposition ? (
+                    <>
+                        <h3 style={{
+                            fontSize: '0.75rem',
+                            fontWeight: 600,
+                            color: 'var(--text-secondary)',
+                            textTransform: 'uppercase',
+                            letterSpacing: '0.05em',
+                            margin: '0 0 var(--spacing-sm) 0',
+                        }}>
+                            Imposition Details
+                        </h3>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-xs)' }}>
+                            {/* File IDs */}
+                            {fileIds.length > 0 && (
+                                <div style={{
+                                    display: 'flex',
+                                    alignItems: 'flex-start',
+                                    gap: 'var(--spacing-xs)',
+                                    padding: 'var(--spacing-sm)',
+                                    background: 'rgba(255, 255, 255, 0.03)',
+                                    border: '1px solid rgba(255, 255, 255, 0.05)',
+                                    borderRadius: 'var(--radius-sm)',
+                                }}>
+                                    <div style={{
+                                        width: '24px',
+                                        height: '24px',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                        background: 'rgba(99, 102, 241, 0.15)',
+                                        borderRadius: 'var(--radius-xs)',
+                                        color: 'var(--accent-primary)',
+                                        flexShrink: 0,
+                                    }}>
+                                        <Package size={14} />
+                                    </div>
+                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                        <div style={{
+                                            fontSize: '0.75rem',
+                                            color: 'var(--text-secondary)',
+                                            textTransform: 'uppercase',
+                                            letterSpacing: '0.05em',
+                                            marginBottom: 'var(--spacing-xs)',
+                                        }}>
+                                            File IDs ({fileIds.length})
+                                        </div>
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-xs)' }}>
+                                            {fileIds.map((fileId, index) => {
+                                                const match = fileId.match(/^(FILE_\d+_\d+_\d+)(?:_|$)/) 
+                                                    || fileId.match(/^(FILE_\d+)_Labex_(\d+_\d+)(?:_|$)/);
+                                                const simplified = match ? (match[2] ? `${match[1]}_${match[2]}` : match[1]) : fileId;
+                                                return (
+                                                    <div key={index} style={{
+                                                        padding: 'var(--spacing-xs) var(--spacing-sm)',
+                                                        background: 'var(--bg-tertiary)',
+                                                        borderRadius: 'var(--radius-sm)',
+                                                        fontSize: '0.8rem',
+                                                        color: 'var(--text-primary)',
+                                                        wordBreak: 'break-all',
+                                                    }}>
+                                                        {simplified}
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Other Details */}
+                            {impositionDetails && Object.entries(impositionDetails).map(([key, value]) => {
+                                const skipFields = [
+                                    'imposition_id', 'file_id', 'file_ids', 'runlist_id',
+                                    'production_path', 'material', 'finishing', 'product_id',
+                                    'pages', 'steps_count', 'layout_around', 'imposed_file_path',
+                                    'imposition_created_at', 'created_at'
+                                ];
+                                if (skipFields.includes(key) || value === null || value === undefined) return null;
+                                
+                                return (
+                                    <div key={key} style={{
+                                        display: 'flex',
+                                        alignItems: 'flex-start',
+                                        gap: 'var(--spacing-xs)',
+                                        padding: 'var(--spacing-sm)',
+                                        background: 'rgba(255, 255, 255, 0.03)',
+                                        border: '1px solid rgba(255, 255, 255, 0.05)',
+                                        borderRadius: 'var(--radius-sm)',
+                                    }}>
+                                        <div style={{
+                                            width: '24px',
+                                            height: '24px',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'center',
+                                            background: 'rgba(99, 102, 241, 0.15)',
+                                            borderRadius: 'var(--radius-xs)',
+                                            color: 'var(--accent-primary)',
+                                            flexShrink: 0,
+                                        }}>
+                                            {key === 'explanation' ? <FileText size={14} /> : <Hash size={14} />}
+                                        </div>
+                                        <div style={{ flex: 1, minWidth: 0 }}>
+                                            <div style={{
+                                                fontSize: '0.75rem',
+                                                color: 'var(--text-secondary)',
+                                                textTransform: 'uppercase',
+                                                letterSpacing: '0.05em',
+                                                marginBottom: 'var(--spacing-xs)',
+                                            }}>
+                                                {key.replace(/_/g, ' ')}
+                                            </div>
+                                            <div style={{
+                                                fontSize: '0.875rem',
+                                                fontWeight: 500,
+                                                color: 'var(--text-primary)',
+                                                wordBreak: 'break-word',
+                                                whiteSpace: key === 'explanation' ? 'pre-wrap' : 'normal',
+                                            }}>
+                                                {String(value)}
+                                            </div>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </>
+                ) : (
+                    <div style={{
+                        height: '100%',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        color: 'var(--text-tertiary)',
+                        textAlign: 'center',
+                    }}>
+                        <FileText size={48} style={{ opacity: 0.3, marginBottom: 'var(--spacing-md)' }} />
+                        <div style={{ fontSize: '0.875rem' }}>No imposition selected</div>
+                    </div>
+                )}
             </div>
         </div>
     );

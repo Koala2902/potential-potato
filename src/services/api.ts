@@ -74,7 +74,7 @@ export async function processScan(
     scanInput: string,
     machineId?: string | null,
     operations?: string[] | null
-): Promise<{ runlistId: string; queue: ProductionQueueItem[] }> {
+): Promise<{ runlistId: string; queue: ProductionQueueItem[]; scannedImpositionId?: string }> {
     const response = await fetch(`${API_BASE_URL}/scan`, {
         method: 'POST',
         headers: {

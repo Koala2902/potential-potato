@@ -1,6 +1,8 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import path from 'path';
+import fs from 'fs';
 import { getProductionQueue, getImpositionDetails, getFileIds, findRunlistByScan, getProductionQueueByRunlist } from './db/queries.js';
 import { getMachines, getAvailableOperations, recordScannedCode, recordRunlistScans, getJobs } from './db/jobmanager-queries.js';
 import { processPrintOSRecords, processScannedCodes } from './db/status-updates.js';
@@ -18,6 +20,9 @@ console.log(`Host: ${process.env.DB_HOST || 'localhost'}`);
 
 app.use(cors());
 app.use(express.json());
+
+// PDF archive folder path
+const PDF_ARCHIVE_PATH = '/Volumes/Daily Print Jobs/_NEXT HotFolder/RDevArchive';
 
 // Root route - server status
 app.get('/', (req, res) => {
@@ -72,6 +77,36 @@ app.get('/api/imposition/:impositionId/file-ids', async (req, res) => {
     } catch (error) {
         console.error('Error fetching file_ids:', error);
         res.status(500).json({ error: 'Failed to fetch file_ids' });
+    }
+});
+
+// Serve PDF from archive folder
+app.get('/api/pdf/:impositionId', async (req, res) => {
+    try {
+        const { impositionId } = req.params;
+        const pdfPath = path.join(PDF_ARCHIVE_PATH, `${impositionId}.pdf`);
+        
+        // Check if file exists
+        if (!fs.existsSync(pdfPath)) {
+            console.log('PDF not found:', pdfPath);
+            return res.status(404).json({ error: 'PDF not found' });
+        }
+        
+        // Set headers for PDF
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `inline; filename="${impositionId}.pdf"`);
+        
+        // Stream the PDF file
+        const fileStream = fs.createReadStream(pdfPath);
+        fileStream.pipe(res);
+        
+        fileStream.on('error', (error) => {
+            console.error('Error streaming PDF:', error);
+            res.status(500).json({ error: 'Failed to stream PDF' });
+        });
+    } catch (error) {
+        console.error('Error serving PDF:', error);
+        res.status(500).json({ error: 'Failed to serve PDF' });
     }
 });
 
@@ -240,14 +275,17 @@ app.post('/api/scan', async (req, res) => {
             }
         }
         
+        // Determine if this is a runlist scan or a file_id scan
+        const isRunlistDirectScan = runlistId && scan === runlistId;
+        
         // Record scan to scanned_codes if machineId and operations are provided
         let recordedScans: any[] = [];
         if (machineId && operations && Array.isArray(operations) && operations.length > 0) {
             console.log(`[POST /api/scan] machineId and operations provided, will record scans`);
             try {
-                if (runlistId) {
-                    // If it's a runlist scan, record individual file_id scans
-                    console.log(`[POST /api/scan] Detected runlist ${runlistId}, recording scans for all file_ids`);
+                if (isRunlistDirectScan) {
+                    // If user scanned the actual runlist barcode, record scans for all files
+                    console.log(`[POST /api/scan] Direct runlist scan detected for ${runlistId}, recording scans for all file_ids`);
                     const scans = await recordRunlistScans(
                         runlistId,
                         machineId,
@@ -262,7 +300,8 @@ app.post('/api/scan', async (req, res) => {
                     }));
                     console.log(`[POST /api/scan] Recorded ${recordedScans.length} individual file_id scans`);
                 } else {
-                    // Regular scan (file_id or job_id_version_tag), record as-is
+                    // Regular scan (single file_id or job_id_version_tag), record only the scanned item
+                    console.log(`[POST /api/scan] Individual file scan, recording only: ${scan}`);
                     const scannedCode = await recordScannedCode(
                         scan,
                         machineId,
@@ -328,11 +367,43 @@ app.post('/api/scan', async (req, res) => {
         
         console.log(`[POST /api/scan] Found runlist: ${runlistId}`);
 
-        // Get production queue filtered by this runlist
+        // Get production queue for this runlist (show all impositions)
         const queue = await getProductionQueueByRunlist(runlistId);
+        
+        // Find which specific imposition contains the scanned file (for auto-selection)
+        let scannedImpositionId: string | null = null;
+        if (!isRunlistDirectScan && queue.length > 0) {
+            const client = await pool.connect();
+            try {
+                // Parse scan to find the file_id pattern
+                const parts = scan.split('_');
+                if (parts.length >= 3) {
+                    const version = parts[parts.length - 1];
+                    const jobIdParts = parts.slice(0, -1);
+                    const jobId = jobIdParts.join('_');
+                    const filePattern = `FILE_${version}_Labex_${jobId}_%`;
+                    
+                    const impositionResult = await client.query(`
+                        SELECT DISTINCT imposition_id
+                        FROM imposition_file_mapping
+                        WHERE file_id LIKE $1
+                        LIMIT 1
+                    `, [filePattern]);
+                    
+                    if (impositionResult.rows.length > 0) {
+                        scannedImpositionId = impositionResult.rows[0].imposition_id;
+                        console.log(`[POST /api/scan] Scanned file belongs to imposition: ${scannedImpositionId}`);
+                    }
+                }
+            } finally {
+                client.release();
+            }
+        }
+        
         res.json({ 
             runlistId, 
             queue,
+            scannedImpositionId, // Send this so frontend can auto-select it
             recordedScans: recordedScans.length > 0 ? recordedScans : undefined
         });
     } catch (error) {

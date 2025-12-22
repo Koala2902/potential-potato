@@ -8,7 +8,11 @@
     "dev:client": "vite",
     "dev:server": "tsx watch server/index.ts",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "check-schema": "tsx server/db/check-schema.ts",
+    "test-connection": "tsx server/db/test-connection.ts",
+    "run-migrations": "tsx server/db/run-migrations.ts",
+    "fix-all-job-timestamps": "tsx server/db/fix-all-job-timestamps.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",
