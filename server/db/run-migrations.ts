@@ -108,6 +108,24 @@ async function main() {
         // Migration 007: Update view latest operation (logs database only)
         await runMigration(path.join(migrationsDir, '007-update-view-latest-operation.sql'), 'logs');
         
+        // Migration 009: Fix status function to check scanned_codes
+        await runMigration(path.join(migrationsDir, '009-fix-status-function-check-scanned-codes.sql'), 'logs');
+        
+        // Migration 010: Fix timestamp timezone
+        await runMigration(path.join(migrationsDir, '010-fix-timestamp-timezone.sql'), 'logs');
+        
+        // Migration 011: Update view with localized time
+        await runMigration(path.join(migrationsDir, '011-update-view-localized-time.sql'), 'logs');
+        
+        // Migration 012: Fix view operation priority
+        await runMigration(path.join(migrationsDir, '012-fix-view-operation-priority.sql'), 'logs');
+        
+        // Migration 013: Fix view compare local time
+        await runMigration(path.join(migrationsDir, '013-fix-view-compare-local-time.sql'), 'logs');
+        
+        // Migration 014: Remove operation sequence priority (use timestamp only)
+        await runMigration(path.join(migrationsDir, '014-remove-operation-sequence-priority.sql'), 'logs');
+        
         // Migration 015: Add operation duration tracking (logs database only)
         await runMigration(path.join(migrationsDir, '015-add-operation-duration-tracking.sql'), 'logs');
         
