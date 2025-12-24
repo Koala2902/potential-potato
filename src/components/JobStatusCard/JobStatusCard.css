@@ -249,10 +249,15 @@
 }
 
 .job-order-date,
-.job-due-date {
+.job-due-date,
+.job-finished-date {
     color: var(--text-secondary);
     font-size: 0.8125rem;
     white-space: nowrap;
+}
+
+.job-finished-date {
+    color: var(--status-success);
 }
 
 .version-indicator {

@@ -356,7 +356,12 @@ export async function getJobs(filters?: JobFilterOptions): Promise<any[]> {
     const client = await pool.connect();
     try {
         // Query from pre-computed view (faster than aggregating on-the-fly)
-        let query = `SELECT * FROM job_status_view WHERE 1=1`;
+        // For production_finished jobs, only show last 14 days
+        let query = `SELECT * FROM job_status_view WHERE 1=1
+            AND (
+                status != 'production_finished' 
+                OR latest_completed_at >= NOW() - INTERVAL '14 days'
+            )`;
         const params: any[] = [];
         let paramIndex = 1;
 

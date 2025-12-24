@@ -125,6 +125,19 @@ export default function JobStatusCard({ config, jobs }: JobStatusCardProps) {
     });
   };
 
+  const formatDateTime = (dateString: string) => {
+    const date = new Date(dateString);
+    return date.toLocaleString('en-US', { 
+      month: 'short', 
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  };
+
+  // Check if this is the production_finished card
+  const isProductionFinished = config.status === 'production_finished';
+
   const formatGroupKey = (key: string) => {
     if (config.groupBy === 'material_finishing') {
       const [material, finishing] = key.split('_');
@@ -304,9 +317,19 @@ export default function JobStatusCard({ config, jobs }: JobStatusCardProps) {
                               </div>
                             )}
                             <span className="job-date-separator">•</span>
-                            <span className="job-order-date">Order: {formatDateShort(job.createdAt)}</span>
-                            <span className="job-date-separator">•</span>
-                            <span className="job-due-date">Due: {formatDateShort(job.dueDate)}</span>
+                            {isProductionFinished && job.completedAt ? (
+                              <>
+                                <span className="job-finished-date">Finished: {formatDateTime(job.completedAt)}</span>
+                                <span className="job-date-separator">•</span>
+                                <span className="job-due-date">Due: {formatDateShort(job.dueDate)}</span>
+                              </>
+                            ) : (
+                              <>
+                                <span className="job-order-date">Order: {formatDateShort(job.createdAt)}</span>
+                                <span className="job-date-separator">•</span>
+                                <span className="job-due-date">Due: {formatDateShort(job.dueDate)}</span>
+                              </>
+                            )}
                           </div>
                         </div>
                       );
