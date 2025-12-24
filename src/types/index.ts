@@ -101,6 +101,7 @@ export interface ProductionQueueItem {
 export interface ImpositionItem {
   imposition_id: string;
   simplified_name: string;
+  sheet_width?: number;
 }
 
 export interface ImpositionDetails {

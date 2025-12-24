@@ -9,6 +9,7 @@ export interface ProductionQueueItem {
 export interface ImpositionItem {
     imposition_id: string;
     simplified_name: string;
+    sheet_width?: number;
 }
 
 export interface ImpositionDetails {
@@ -241,58 +242,62 @@ export async function findRunlistByScan(scanInput: string): Promise<string | nul
 export async function getProductionQueueByRunlist(runlistId: string): Promise<ProductionQueueItem[]> {
     const client = await pool.connect();
     try {
+        // Get impositions with sheet_width for sorting
         const result = await client.query(
             `
-            SELECT 
-                runlist_id,
-                COUNT(DISTINCT imposition_id) as imposition_count,
-                ARRAY_AGG(DISTINCT imposition_id ORDER BY imposition_id) as imposition_ids
-            FROM production_planner_paths
-            WHERE runlist_id = $1
-            GROUP BY runlist_id
-            ORDER BY runlist_id
+            SELECT DISTINCT
+                ppp.runlist_id,
+                ppp.imposition_id,
+                COALESCE(ic.sheet_width, 0) as sheet_width
+            FROM production_planner_paths ppp
+            LEFT JOIN imposition_configurations ic ON ic.imposition_id = ppp.imposition_id
+            WHERE ppp.runlist_id = $1
+            ORDER BY COALESCE(ic.sheet_width, 0) ASC, ppp.imposition_id
         `,
             [runlistId]
         );
 
-        const queue: ProductionQueueItem[] = result.rows.map((row) => {
-            const impositions: ImpositionItem[] = (row.imposition_ids || []).map((id: string) => {
-                const parts = id.split('_');
-                const sizeMatch = parts.find(p => /^\d+x\d+/.test(p));
-                const shapeMatch = parts.find(p => ['circle', 'rectangle', 'square'].includes(p.toLowerCase()));
-                const configIndex = parts.findIndex(p => p.toLowerCase() === 'config');
-                const configNumber = configIndex >= 0 && configIndex < parts.length - 1 ? parts[configIndex + 1] : null;
-                
-                let simplified = id;
-                if (sizeMatch && shapeMatch && configNumber) {
-                    const shapeCapitalized = shapeMatch.charAt(0).toUpperCase() + shapeMatch.slice(1);
-                    simplified = `${sizeMatch} ${shapeCapitalized} Config ${configNumber}`;
-                } else if (sizeMatch && configNumber) {
-                    simplified = `${sizeMatch} Config ${configNumber}`;
-                } else if (sizeMatch && shapeMatch) {
-                    const shapeCapitalized = shapeMatch.charAt(0).toUpperCase() + shapeMatch.slice(1);
-                    simplified = `${sizeMatch} ${shapeCapitalized}`;
-                } else if (parts.length > 0) {
-                    const lastParts = parts.slice(-3);
-                    simplified = lastParts.map((p, i) => 
-                        i === 0 ? p.charAt(0).toUpperCase() + p.slice(1) : p
-                    ).join(' ');
-                }
-                
-                return {
-                    imposition_id: id,
-                    simplified_name: simplified,
-                };
-            });
+        if (result.rows.length === 0) {
+            return [];
+        }
 
+        // Build impositions list sorted by sheet_width (smallest first)
+        const impositions: ImpositionItem[] = result.rows.map((row) => {
+            const id = row.imposition_id;
+            const parts = id.split('_');
+            const sizeMatch = parts.find((p: string) => /^\d+x\d+/.test(p));
+            const shapeMatch = parts.find((p: string) => ['circle', 'rectangle', 'square'].includes(p.toLowerCase()));
+            const configIndex = parts.findIndex((p: string) => p.toLowerCase() === 'config');
+            const configNumber = configIndex >= 0 && configIndex < parts.length - 1 ? parts[configIndex + 1] : null;
+            
+            let simplified = id;
+            if (sizeMatch && shapeMatch && configNumber) {
+                const shapeCapitalized = shapeMatch.charAt(0).toUpperCase() + shapeMatch.slice(1);
+                simplified = `${sizeMatch} ${shapeCapitalized} Config ${configNumber}`;
+            } else if (sizeMatch && configNumber) {
+                simplified = `${sizeMatch} Config ${configNumber}`;
+            } else if (sizeMatch && shapeMatch) {
+                const shapeCapitalized = shapeMatch.charAt(0).toUpperCase() + shapeMatch.slice(1);
+                simplified = `${sizeMatch} ${shapeCapitalized}`;
+            } else if (parts.length > 0) {
+                const lastParts = parts.slice(-3);
+                simplified = lastParts.map((p: string, i: number) => 
+                    i === 0 ? p.charAt(0).toUpperCase() + p.slice(1) : p
+                ).join(' ');
+            }
+            
             return {
-                runlist_id: row.runlist_id,
-                imposition_count: parseInt(row.imposition_count) || impositions.length,
-                impositions,
+                imposition_id: id,
+                simplified_name: simplified,
+                sheet_width: parseFloat(row.sheet_width) || 0,
             };
         });
 
-        return queue;
+        return [{
+            runlist_id: runlistId,
+            imposition_count: impositions.length,
+            impositions,
+        }];
     } finally {
         client.release();
     }

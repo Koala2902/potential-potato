@@ -5,6 +5,9 @@ import { ProductionQueueItem, ImpositionItem, ImpositionDetails } from '../../ty
 import { fetchProductionQueue, fetchImpositionDetails, fetchFileIds, processScan, fetchMachines, fetchOperations, Machine, Operation } from '../../services/api';
 import { Settings, ChevronDown, AlertCircle, X, Package, Hash, FileText } from 'lucide-react';
 
+// Hidden input ref for barcode scanning (scanner sends keystrokes)
+// We don't need a visible input bar - the global keyboard listener handles scanning
+
 export default function TicketPage() {
     const [queue, setQueue] = useState<ProductionQueueItem[]>([]);
     const [selectedImposition, setSelectedImposition] = useState<ImpositionItem | null>(null);
@@ -13,10 +16,8 @@ export default function TicketPage() {
     const [expandedRunlists, setExpandedRunlists] = useState<Set<string>>(new Set());
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
-    const [scanInput, setScanInput] = useState<string>('');
     const [isScanning, setIsScanning] = useState(false);
     const [hasScanned, setHasScanned] = useState(false); // Track if any job has been scanned
-    const scanInputRef = useRef<HTMLInputElement>(null);
     const scanBufferRef = useRef<string>('');
     const scanTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     
@@ -80,11 +81,6 @@ export default function TicketPage() {
         loadOperations();
     }, []);
 
-    // Focus scan input on mount
-    useEffect(() => {
-        scanInputRef.current?.focus();
-    }, []);
-
     // Extract scan processing logic into a separate function with useCallback
     const processScanValue = useCallback(async (scanValue: string) => {
         if (!scanValue.trim() || isScanning) {
@@ -135,9 +131,8 @@ export default function TicketPage() {
                 }
             }
 
-            // Clear scan input
-            setScanInput('');
-            scanInputRef.current?.focus();
+            // Clear scan buffer
+            scanBufferRef.current = '';
         } catch (err) {
             const errorMessage = err instanceof Error ? err.message : 'Failed to process scan';
             
@@ -160,7 +155,7 @@ export default function TicketPage() {
         } finally {
             setIsScanning(false);
         }
-    }, [isScanning, selectedOperations, selectedMachineId, setNotification, setIsScanning, setError, setQueue, setHasScanned, setExpandedRunlists, setSelectedImposition, setScanInput]);
+    }, [isScanning, selectedOperations, selectedMachineId]);
 
     // Global keyboard listener for QR code scanning (works without input focus)
     useEffect(() => {
@@ -172,12 +167,7 @@ export default function TicketPage() {
                                  target.isContentEditable ||
                                  (target.tagName === 'SELECT');
             
-            // If it's the scan input field, let it handle normally
-            if (target === scanInputRef.current) {
-                return;
-            }
-
-            // If user is typing in another input, ignore
+            // If user is typing in an input, ignore
             if (isInputElement) {
                 scanBufferRef.current = '';
                 if (scanTimeoutRef.current) {
@@ -203,7 +193,6 @@ export default function TicketPage() {
                 if (bufferedValue && bufferedValue.length > 0 && selectedOperations.length > 0 && !isScanning) {
                     console.log('[Global Scan] Processing buffered scan:', bufferedValue);
                     scanBufferRef.current = '';
-                    setScanInput(bufferedValue);
                     // Trigger scan processing with raw value (preserve underscores)
                     processScanValue(bufferedValue);
                 } else {
@@ -304,24 +293,6 @@ export default function TicketPage() {
             }
             return newSet;
         });
-    };
-
-    // Handle scan input (form submit)
-    const handleScanSubmit = async (e: React.FormEvent) => {
-        e.preventDefault();
-        if (!scanInput.trim() || isScanning) {
-            return;
-        }
-        await processScanValue(scanInput.trim());
-    };
-
-    // Handle scan input change (for barcode scanners that auto-submit)
-    const handleScanInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        const value = e.target.value;
-        setScanInput(value);
-        
-        // Auto-submit if Enter key was pressed (barcode scanner behavior)
-        // This will be handled by form submit
     };
 
     if (loading) {
@@ -536,13 +507,11 @@ export default function TicketPage() {
                     )}
                 </div>
 
-                {/* Scan Input */}
-                <div className="scan-input-container" style={{ padding: 'var(--spacing-md)', borderBottom: '1px solid var(--border-color)' }}>
-                    {/* Notification */}
-                    {notification && (
+                {/* Notification Area */}
+                {notification && (
+                    <div style={{ padding: 'var(--spacing-md)', borderBottom: '1px solid var(--border-color)' }}>
                         <div
                             style={{
-                                marginBottom: 'var(--spacing-md)',
                                 padding: 'var(--spacing-sm) var(--spacing-md)',
                                 background: notification.type === 'error' 
                                     ? 'rgba(239, 68, 68, 0.1)' 
@@ -557,10 +526,10 @@ export default function TicketPage() {
                                 color: notification.type === 'error' 
                                     ? 'rgb(239, 68, 68)' 
                                     : 'rgb(34, 197, 94)',
-                                fontSize: '0.875rem',
+                                fontSize: '0.75rem',
                             }}
                         >
-                            <AlertCircle size={16} />
+                            <AlertCircle size={14} />
                             <span style={{ flex: 1 }}>{notification.message}</span>
                             <button
                                 onClick={() => setNotification(null)}
@@ -574,49 +543,11 @@ export default function TicketPage() {
                                     alignItems: 'center',
                                 }}
                             >
-                                <X size={14} />
+                                <X size={12} />
                             </button>
                         </div>
-                    )}
-                    <form onSubmit={handleScanSubmit}>
-                        <input
-                            ref={scanInputRef}
-                            type="text"
-                            value={scanInput}
-                            onChange={handleScanInputChange}
-                            placeholder={selectedOperations.length === 0 
-                                ? "Select operations first..." 
-                                : "Scan barcode (job_id_version_tag or runlist)..."
-                            }
-                            disabled={isScanning || selectedOperations.length === 0}
-                            style={{
-                                width: '100%',
-                                padding: 'var(--spacing-sm) var(--spacing-md)',
-                                background: selectedOperations.length === 0 
-                                    ? 'var(--bg-secondary)' 
-                                    : 'var(--bg-tertiary)',
-                                border: '1px solid var(--border-color)',
-                                borderRadius: 'var(--radius-sm)',
-                                color: selectedOperations.length === 0 
-                                    ? 'var(--text-secondary)' 
-                                    : 'var(--text-primary)',
-                                fontSize: '0.875rem',
-                                cursor: selectedOperations.length === 0 ? 'not-allowed' : 'text',
-                                opacity: selectedOperations.length === 0 ? 0.6 : 1,
-                            }}
-                        />
-                        {selectedOperations.length === 0 && (
-                            <div style={{
-                                fontSize: '0.75rem',
-                                color: 'var(--text-secondary)',
-                                marginTop: 'var(--spacing-xs)',
-                                paddingLeft: 'var(--spacing-xs)',
-                            }}>
-                                Select at least one operation in Operation Settings to enable scanning
-                            </div>
-                        )}
-                    </form>
-                </div>
+                    </div>
+                )}
                 {/* Only show production queue if a job has been scanned */}
                 {hasScanned && (
                     <ProductionQueueList
