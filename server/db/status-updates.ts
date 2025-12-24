@@ -22,6 +22,7 @@ interface PrintOSRecord {
     marker: number;
     job_complete_time: Date;
     copies: number;
+    payload?: any; // JSONB payload containing jobElapseTime, jobSubmitTime, etc.
 }
 
 /**
@@ -51,13 +52,15 @@ async function getLastProcessedMarker(markerType: 'print_os' | 'scanned_codes'):
 async function updateLastProcessedMarker(markerType: 'print_os' | 'scanned_codes', markerId: number): Promise<void> {
     const client = await jobmanagerPool.connect();
     try {
+        // Use INSERT ... ON CONFLICT to create marker if it doesn't exist
         await client.query(
-            `UPDATE processing_markers 
-             SET last_processed_id = $1, 
-                 last_processed_at = NOW(), 
-                 updated_at = NOW() 
-             WHERE marker_type = $2`,
-            [markerId, markerType]
+            `INSERT INTO processing_markers (marker_type, last_processed_id, last_processed_at, updated_at)
+             VALUES ($1, $2, NOW(), NOW())
+             ON CONFLICT (marker_type) DO UPDATE SET
+                 last_processed_id = EXCLUDED.last_processed_id,
+                 last_processed_at = NOW(),
+                 updated_at = NOW()`,
+            [markerType, markerId]
         );
     } finally {
         client.release();
@@ -312,10 +315,82 @@ async function updateJobOperation(
             [completedAt, completedBy, sourceId, status, jobId, versionTag, operationId]
         );
         
-        // If no rows updated, log a warning but don't fail (operation might not be planned for this job)
+        // If no rows updated, try to create the row (operation might not have been planned)
         if (updateResult.rowCount === 0) {
-            console.warn(`No job_operations row found for job_id=${jobId}, version_tag=${versionTag}, operation_id=${operationId} - skipping update`);
+            console.log(`No job_operations row found for job_id=${jobId}, version_tag=${versionTag}, operation_id=${operationId} - creating new row`);
+            try {
+                // Generate job_operation_id (format: job_id_version_tag_operation_id)
+                const jobOperationId = `${jobId}_${versionTag}_${operationId}`;
+                
+                // Try INSERT with ON CONFLICT to handle race conditions
+                const insertResult = await client.query(
+                    `INSERT INTO job_operations (
+                        job_operation_id,
+                        job_id,
+                        version_tag,
+                        operation_id,
+                        completed_at,
+                        completed_by,
+                        source_id,
+                        status,
+                        sequence_order,
+                        required
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, false)
+                    ON CONFLICT (job_operation_id) DO UPDATE SET
+                        completed_at = EXCLUDED.completed_at,
+                        completed_by = EXCLUDED.completed_by,
+                        source_id = EXCLUDED.source_id,
+                        status = EXCLUDED.status
+                    RETURNING *`,
+                    [jobOperationId, jobId, versionTag, operationId, completedAt, completedBy, sourceId, status]
+                );
+                
+                if (insertResult.rowCount === 0) {
+                    console.warn(`Failed to create job_operations row for job_id=${jobId}, version_tag=${versionTag}, operation_id=${operationId}`);
+                    return;
+                }
+                
+                console.log(`✓ Created job_operations row for job_id=${jobId}, version_tag=${versionTag}, operation_id=${operationId}`);
+            } catch (insertError: any) {
+                // If insert fails, try UPDATE again (might have been created by another process)
+                const retryUpdateResult = await client.query(
+                    `UPDATE job_operations 
+                     SET completed_at = $1,
+                         completed_by = $2,
+                         source_id = $3,
+                         status = $4
+                     WHERE job_id = $5 
+                     AND version_tag = $6 
+                     AND operation_id = $7`,
+                    [completedAt, completedBy, sourceId, status, jobId, versionTag, operationId]
+                );
+                
+                if (retryUpdateResult.rowCount === 0) {
+                    console.warn(`Could not create or update job_operations row for job_id=${jobId}, version_tag=${versionTag}, operation_id=${operationId}:`, insertError.message);
+                    return;
+                }
+            }
         }
+        
+        // Calculate and update operation duration from scanned_codes
+        // This calculates the duration between START and END batches for this job/operation
+        // Stores result in job_operation_duration table (separate from job_operations)
+        // NOTE: Skip op001 (print operation) - it has its own duration from Print OS
+        if (completedBy === 'scanner' && status === 'completed' && operationId !== 'op001') {
+            try {
+                await client.query(
+                    `SELECT update_operation_duration($1, $2, $3)`,
+                    [jobId, versionTag, operationId]
+                );
+            } catch (durationError: any) {
+                // Log but don't fail - duration calculation is optional
+                console.warn(`Could not calculate operation duration for job_id=${jobId}, version_tag=${versionTag}, operation_id=${operationId}:`, durationError.message);
+            }
+        }
+        
+        // For op001 (print operation) from Print OS, duration will be set separately
+        // when processing Print OS records (they have access to payload with jobElapseTime)
     } catch (error: any) {
         // If status column doesn't exist, try without it
         const errorMsg = error.message || String(error);
@@ -332,7 +407,32 @@ async function updateJobOperation(
                     [completedAt, completedBy, sourceId, jobId, versionTag, operationId]
                 );
                 if (updateResult.rowCount === 0) {
-                    console.warn(`No job_operations row found for job_id=${jobId}, version_tag=${versionTag}, operation_id=${operationId} - skipping update`);
+                    // Try to create the row
+                    const jobOperationId = `${jobId}_${versionTag}_${operationId}`;
+                    try {
+                        await client.query(
+                            `INSERT INTO job_operations (
+                                job_operation_id,
+                                job_id,
+                                version_tag,
+                                operation_id,
+                                completed_at,
+                                completed_by,
+                                source_id,
+                                sequence_order,
+                                required
+                            )
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, false)
+                            ON CONFLICT (job_operation_id) DO UPDATE SET
+                                completed_at = EXCLUDED.completed_at,
+                                completed_by = EXCLUDED.completed_by,
+                                source_id = EXCLUDED.source_id`,
+                            [jobOperationId, jobId, versionTag, operationId, completedAt, completedBy, sourceId]
+                        );
+                        console.log(`✓ Created job_operations row (retry path) for job_id=${jobId}, version_tag=${versionTag}, operation_id=${operationId}`);
+                    } catch (insertError: any) {
+                        console.warn(`Could not create job_operations row for job_id=${jobId}, version_tag=${versionTag}, operation_id=${operationId}:`, insertError.message);
+                    }
                 }
                 // Successfully handled - don't re-throw, just return silently
                 return;
@@ -344,6 +444,70 @@ async function updateJobOperation(
         } else {
             throw error;
         }
+    } finally {
+        client.release();
+    }
+}
+
+/**
+ * Update operation duration from Print OS payload (for op001 only)
+ * Extracts jobElapseTime from Print OS payload and stores it in job_operation_duration
+ */
+async function updatePrintOSDuration(
+    jobId: string,
+    versionTag: string,
+    operationId: string,
+    printOSPayload: any,
+    completedAt: Date
+): Promise<void> {
+    const client = await logsPool.connect();
+    try {
+        // Extract duration from Print OS payload
+        let durationSeconds: number | null = null;
+        let startedAt: Date | null = null;
+        
+        if (printOSPayload) {
+            const payload = typeof printOSPayload === 'string' ? JSON.parse(printOSPayload) : printOSPayload;
+            
+            // jobElapseTime is in seconds
+            if (payload.jobElapseTime !== undefined && payload.jobElapseTime !== null) {
+                durationSeconds = parseInt(payload.jobElapseTime) || null;
+            }
+            
+            // Calculate started_at from completed_at and duration
+            if (durationSeconds !== null && completedAt) {
+                startedAt = new Date(completedAt.getTime() - (durationSeconds * 1000));
+            } else if (payload.jobSubmitTime) {
+                // Use jobSubmitTime if available
+                startedAt = new Date(payload.jobSubmitTime);
+            }
+        }
+        
+        // Insert or update job_operation_duration record
+        // Set machine_id to HP_INDIGO_6900 for Print OS records
+        await client.query(`
+            INSERT INTO job_operation_duration (
+                job_id,
+                version_tag,
+                operation_id,
+                machine_id,
+                operation_duration_seconds,
+                operation_started_at,
+                operation_completed_at,
+                updated_at
+            )
+            VALUES ($1, $2, $3, 'HP_INDIGO_6900', $4, $5, $6, NOW())
+            ON CONFLICT (job_id, version_tag, operation_id) DO UPDATE SET
+                machine_id = 'HP_INDIGO_6900',
+                operation_duration_seconds = EXCLUDED.operation_duration_seconds,
+                operation_started_at = COALESCE(EXCLUDED.operation_started_at, job_operation_duration.operation_started_at),
+                operation_completed_at = COALESCE(EXCLUDED.operation_completed_at, job_operation_duration.operation_completed_at),
+                updated_at = NOW();
+        `, [jobId, versionTag, operationId, durationSeconds, startedAt, completedAt]);
+        
+    } catch (error: any) {
+        // Log but don't fail - duration update is optional
+        console.warn(`Could not update Print OS duration for job_id=${jobId}, version_tag=${versionTag}, operation_id=${operationId}:`, error.message);
     } finally {
         client.release();
     }
@@ -534,7 +698,7 @@ export async function processPrintOSRecords(): Promise<{
         // Query "print OS" table (note: table name has space, must be quoted)
         // Get all records, then deduplicate by name (imposition_id) keeping only the latest (highest marker)
         const printOSResult = await printOSClient.query(
-            `SELECT id, name, status, marker, job_complete_time, copies 
+            `SELECT id, name, status, marker, job_complete_time, copies, payload 
              FROM "print OS" 
              WHERE marker > $1 
              ORDER BY marker ASC`,
@@ -556,6 +720,7 @@ export async function processPrintOSRecords(): Promise<{
                     marker: marker,
                     job_complete_time: row.job_complete_time,
                     copies: parseInt(row.copies) || 0,
+                    payload: row.payload, // Include payload for duration extraction
                 });
             }
         }
@@ -613,6 +778,17 @@ export async function processPrintOSRecords(): Promise<{
                             completedAt,
                             'print_os'
                         );
+                        
+                        // Update Print OS duration for op001 (if completed)
+                        if (status === 'completed' && printOperationId === 'op001' && record.payload) {
+                            await updatePrintOSDuration(
+                                manualFile.jobId,
+                                versionTag,
+                                printOperationId,
+                                record.payload,
+                                completedAt
+                            );
+                        }
                         
                         uniqueJobs.add(`${manualFile.jobId}_${versionTag}`);
                     }
@@ -690,6 +866,17 @@ export async function processPrintOSRecords(): Promise<{
                             completedAt,
                             'print_os'
                         );
+                        
+                        // Update Print OS duration for op001 (if completed)
+                        if (status === 'completed' && printOperationId === 'op001' && record.payload) {
+                            await updatePrintOSDuration(
+                                jobId,
+                                versionTag,
+                                printOperationId,
+                                record.payload,
+                                completedAt
+                            );
+                        }
                         
                         uniqueJobs.add(`${jobId}_${versionTag}`);
                     }
@@ -966,7 +1153,7 @@ export async function processScannedCodes(): Promise<{
 
     // Get last processed scan_id
     const lastProcessedScanId = await getLastProcessedMarker('scanned_codes');
-    console.log(`Processing scanned codes with scan_id > ${lastProcessedScanId}`);
+    console.log(`[processScannedCodes] Processing scanned codes with scan_id > ${lastProcessedScanId}`);
 
     const scannedClient = await logsPool.connect(); // Use logs database pool
 
@@ -981,7 +1168,11 @@ export async function processScannedCodes(): Promise<{
         );
 
         const scans = scannedResult.rows;
-        console.log(`Found ${scans.length} new scanned codes to process`);
+        console.log(`[processScannedCodes] Found ${scans.length} new scanned codes to process`);
+        
+        if (scans.length > 0) {
+            console.log(`[processScannedCodes] Scan IDs range: ${scans[0].scan_id} to ${scans[scans.length - 1].scan_id}`);
+        }
 
         if (scans.length === 0) {
             return { processed: 0, jobsUpdated: 0, lastScanId: lastProcessedScanId, errors: [] };
@@ -1025,7 +1216,7 @@ export async function processScannedCodes(): Promise<{
                 // Operations are stored as operation_ids (e.g., 'op001', 'op002')
                 const operationsArray = operationsObj.operations || [];
                 if (!Array.isArray(operationsArray) || operationsArray.length === 0) {
-                    console.warn(`No operations found for scan ${scanId}`);
+                    console.warn(`[processScannedCodes] Scan ${scanId}: No operations found in operations field: ${JSON.stringify(operationsObj)}`);
                     lastScanId = Math.max(lastScanId, scanId);
                     continue;
                 }
@@ -1221,13 +1412,16 @@ export async function processScannedCodes(): Promise<{
                 processed++;
                 lastScanId = Math.max(lastScanId, scanId);
 
-                console.log(`✓ Processed scan ${scanId}: ${codeText}, updated ${uniqueJobs.size} jobs, operations: ${validOperationIds.join(', ')}`);
+                console.log(`[processScannedCodes] ✓ Processed scan ${scanId}: ${codeText}, updated ${uniqueJobs.size} jobs, operations: ${validOperationIds.join(', ')}`);
 
             } catch (error: any) {
                 const errorMsg = error.message || String(error);
                 // Don't log "status column does not exist" errors as they're already handled in update functions
                 if (!errorMsg.includes('column') || !errorMsg.includes('status')) {
-                    console.error(`✗ Error processing scan ${scan.scan_id}:`, errorMsg);
+                    console.error(`[processScannedCodes] ✗ Error processing scan ${scan.scan_id}:`, errorMsg);
+                    if (error.stack) {
+                        console.error(`[processScannedCodes] Stack:`, error.stack);
+                    }
                     errors.push(`Scan ${scan.scan_id}: ${errorMsg}`);
                 }
                 lastScanId = Math.max(lastScanId, parseInt(scan.scan_id));
@@ -1235,12 +1429,17 @@ export async function processScannedCodes(): Promise<{
         }
 
         // Update last processed scan_id
+        // Always update marker to highest scan_id we've seen (even if skipped)
         if (scans.length > 0) {
             const highestScanId = Math.max(...scans.map(s => parseInt(s.scan_id)));
-            if (highestScanId > lastProcessedScanId) {
-                await updateLastProcessedMarker('scanned_codes', highestScanId);
-                console.log(`Updated last processed scan_id to ${highestScanId} (processed ${processed}, skipped ${scans.length - processed})`);
-            }
+            await updateLastProcessedMarker('scanned_codes', highestScanId);
+            console.log(`[processScannedCodes] Updated last processed scan_id to ${highestScanId} (processed ${processed}, skipped ${scans.length - processed})`);
+        } else if (lastScanId > lastProcessedScanId) {
+            // Update marker even if no scans were processed but we saw a scan_id (from errors)
+            await updateLastProcessedMarker('scanned_codes', lastScanId);
+            console.log(`[processScannedCodes] Updated last processed scan_id to ${lastScanId} (no scans processed)`);
+        } else {
+            console.log(`[processScannedCodes] No new scans to process (last processed: ${lastProcessedScanId})`);
         }
 
     } finally {

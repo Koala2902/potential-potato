@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import ProductionQueueList from '../../components/LeftPanel/ProductionQueueList';
 import ImpositionViewer from '../../components/MiddlePanel/ImpositionViewer';
 import { ProductionQueueItem, ImpositionItem, ImpositionDetails } from '../../types';
@@ -17,6 +17,8 @@ export default function TicketPage() {
     const [isScanning, setIsScanning] = useState(false);
     const [hasScanned, setHasScanned] = useState(false); // Track if any job has been scanned
     const scanInputRef = useRef<HTMLInputElement>(null);
+    const scanBufferRef = useRef<string>('');
+    const scanTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     
     // Machine and operation selection
     const [machines, setMachines] = useState<Machine[]>([]);
@@ -83,6 +85,175 @@ export default function TicketPage() {
         scanInputRef.current?.focus();
     }, []);
 
+    // Extract scan processing logic into a separate function with useCallback
+    const processScanValue = useCallback(async (scanValue: string) => {
+        if (!scanValue.trim() || isScanning) {
+            return;
+        }
+
+        // Validate that operations are selected
+        if (selectedOperations.length === 0) {
+            setNotification({
+                message: 'Please select at least one operation before scanning',
+                type: 'error'
+            });
+            return;
+        }
+
+        try {
+            setIsScanning(true);
+            setError(null);
+            setNotification(null);
+
+            // Process scan and get filtered runlist (with machine and operations if selected)
+            // Use scan value as-is (preserve underscores from scanner)
+            const { runlistId, queue: filteredQueue, scannedImpositionId } = await processScan(
+                scanValue,
+                selectedMachineId || null,
+                selectedOperations.length > 0 ? selectedOperations : null
+            );
+            
+            setQueue(filteredQueue);
+            setHasScanned(true); // Mark that a scan has occurred
+            
+            // Expand the runlist automatically
+            if (filteredQueue.length > 0) {
+                setExpandedRunlists(new Set([runlistId]));
+                
+                // Auto-select the scanned imposition if provided, otherwise first one
+                if (scannedImpositionId && filteredQueue[0]?.impositions) {
+                    const scannedImposition = filteredQueue[0].impositions.find(
+                        imp => imp.imposition_id === scannedImpositionId
+                    );
+                    if (scannedImposition) {
+                        setSelectedImposition(scannedImposition);
+                    } else if (filteredQueue[0].impositions.length > 0) {
+                        setSelectedImposition(filteredQueue[0].impositions[0]);
+                    }
+                } else if (filteredQueue[0]?.impositions && filteredQueue[0].impositions.length > 0) {
+                    setSelectedImposition(filteredQueue[0].impositions[0]);
+                }
+            }
+
+            // Clear scan input
+            setScanInput('');
+            scanInputRef.current?.focus();
+        } catch (err) {
+            const errorMessage = err instanceof Error ? err.message : 'Failed to process scan';
+            
+            // If no runlist found, show notification but keep the current queue
+            if (errorMessage.includes('No runlist found') || errorMessage.includes('No imposition')) {
+                setNotification({
+                    message: 'No runlist or imposition ID found for this scan',
+                    type: 'error'
+                });
+                // Keep the current queue visible, don't clear it
+            } else {
+                // For other errors, still show notification but don't clear queue
+                setNotification({
+                    message: errorMessage,
+                    type: 'error'
+                });
+            }
+            
+            console.error('Error processing scan:', err);
+        } finally {
+            setIsScanning(false);
+        }
+    }, [isScanning, selectedOperations, selectedMachineId, setNotification, setIsScanning, setError, setQueue, setHasScanned, setExpandedRunlists, setSelectedImposition, setScanInput]);
+
+    // Global keyboard listener for QR code scanning (works without input focus)
+    useEffect(() => {
+        const handleGlobalKeyDown = (e: KeyboardEvent) => {
+            // Ignore if user is typing in an input field, textarea, or contenteditable element
+            const target = e.target as HTMLElement;
+            const isInputElement = target.tagName === 'INPUT' || 
+                                 target.tagName === 'TEXTAREA' || 
+                                 target.isContentEditable ||
+                                 (target.tagName === 'SELECT');
+            
+            // If it's the scan input field, let it handle normally
+            if (target === scanInputRef.current) {
+                return;
+            }
+
+            // If user is typing in another input, ignore
+            if (isInputElement) {
+                scanBufferRef.current = '';
+                if (scanTimeoutRef.current) {
+                    clearTimeout(scanTimeoutRef.current);
+                    scanTimeoutRef.current = null;
+                }
+                return;
+            }
+
+            // Handle Enter key - process the buffered scan
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                e.stopPropagation();
+                
+                const bufferedValue = scanBufferRef.current.trim();
+                
+                if (scanTimeoutRef.current) {
+                    clearTimeout(scanTimeoutRef.current);
+                    scanTimeoutRef.current = null;
+                }
+
+                // Process scan if we have a value and operations are selected
+                if (bufferedValue && bufferedValue.length > 0 && selectedOperations.length > 0 && !isScanning) {
+                    console.log('[Global Scan] Processing buffered scan:', bufferedValue);
+                    scanBufferRef.current = '';
+                    setScanInput(bufferedValue);
+                    // Trigger scan processing with raw value (preserve underscores)
+                    processScanValue(bufferedValue);
+                } else {
+                    // Clear buffer if conditions not met
+                    scanBufferRef.current = '';
+                }
+                return;
+            }
+
+            // Handle regular character input (for barcode scanners)
+            // Capture all printable characters including underscores (even with Shift key)
+            // Underscore is typically Shift+Minus, so we need to allow Shift for underscore
+            if (e.key === '_' || 
+                (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey && 
+                 (e.key.match(/[a-zA-Z0-9_\-]/) || (e.key === '-' && e.shiftKey)))) {
+                // Clear any existing timeout
+                if (scanTimeoutRef.current) {
+                    clearTimeout(scanTimeoutRef.current);
+                }
+
+                // Add character to buffer (use '_' if Shift+Minus, otherwise use the key)
+                const charToAdd = (e.key === '-' && e.shiftKey) ? '_' : e.key;
+                scanBufferRef.current += charToAdd;
+                console.log('[Global Scan] Buffer updated:', scanBufferRef.current);
+
+                // Clear buffer after 500ms of no input (prevents accidental capture of normal typing)
+                // Increased from 100ms to 500ms to better handle barcode scanner timing
+                scanTimeoutRef.current = setTimeout(() => {
+                    console.log('[Global Scan] Buffer timeout - clearing:', scanBufferRef.current);
+                    scanBufferRef.current = '';
+                }, 500);
+            } else if (e.key === 'Backspace' || e.key === 'Delete') {
+                // Handle backspace/delete - clear buffer if user is correcting
+                if (scanBufferRef.current.length > 0) {
+                    scanBufferRef.current = scanBufferRef.current.slice(0, -1);
+                }
+            }
+        };
+
+        // Add global event listener with capture phase to catch events early
+        window.addEventListener('keydown', handleGlobalKeyDown, true);
+
+        return () => {
+            window.removeEventListener('keydown', handleGlobalKeyDown, true);
+            if (scanTimeoutRef.current) {
+                clearTimeout(scanTimeoutRef.current);
+            }
+        };
+    }, [selectedOperations, isScanning, processScanValue]);
+
     // Auto-dismiss notification after 5 seconds
     useEffect(() => {
         if (notification) {
@@ -135,81 +306,13 @@ export default function TicketPage() {
         });
     };
 
-    // Handle scan input
+    // Handle scan input (form submit)
     const handleScanSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!scanInput.trim() || isScanning) {
             return;
         }
-
-        // Validate that operations are selected
-        if (selectedOperations.length === 0) {
-            setNotification({
-                message: 'Please select at least one operation before scanning',
-                type: 'error'
-            });
-            return;
-        }
-
-        try {
-            setIsScanning(true);
-            setError(null);
-            setNotification(null);
-
-            // Process scan and get filtered runlist (with machine and operations if selected)
-            const { runlistId, queue: filteredQueue, scannedImpositionId } = await processScan(
-                scanInput.trim(),
-                selectedMachineId || null,
-                selectedOperations.length > 0 ? selectedOperations : null
-            );
-            
-            setQueue(filteredQueue);
-            setHasScanned(true); // Mark that a scan has occurred
-            
-            // Expand the runlist automatically
-            if (filteredQueue.length > 0) {
-                setExpandedRunlists(new Set([runlistId]));
-                
-                // Auto-select the scanned imposition if provided, otherwise first one
-                if (scannedImpositionId && filteredQueue[0]?.impositions) {
-                    const scannedImposition = filteredQueue[0].impositions.find(
-                        imp => imp.imposition_id === scannedImpositionId
-                    );
-                    if (scannedImposition) {
-                        setSelectedImposition(scannedImposition);
-                    } else if (filteredQueue[0].impositions.length > 0) {
-                        setSelectedImposition(filteredQueue[0].impositions[0]);
-                    }
-                } else if (filteredQueue[0]?.impositions && filteredQueue[0].impositions.length > 0) {
-                    setSelectedImposition(filteredQueue[0].impositions[0]);
-                }
-            }
-
-            // Clear scan input
-            setScanInput('');
-            scanInputRef.current?.focus();
-        } catch (err) {
-            const errorMessage = err instanceof Error ? err.message : 'Failed to process scan';
-            
-            // If no runlist found, show notification but keep the current queue
-            if (errorMessage.includes('No runlist found') || errorMessage.includes('No imposition')) {
-                setNotification({
-                    message: 'No runlist or imposition ID found for this scan',
-                    type: 'error'
-                });
-                // Keep the current queue visible, don't clear it
-            } else {
-                // For other errors, still show notification but don't clear queue
-                setNotification({
-                    message: errorMessage,
-                    type: 'error'
-                });
-            }
-            
-            console.error('Error processing scan:', err);
-        } finally {
-            setIsScanning(false);
-        }
+        await processScanValue(scanInput.trim());
     };
 
     // Handle scan input change (for barcode scanners that auto-submit)

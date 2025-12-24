@@ -108,6 +108,9 @@ async function main() {
         // Migration 007: Update view latest operation (logs database only)
         await runMigration(path.join(migrationsDir, '007-update-view-latest-operation.sql'), 'logs');
         
+        // Migration 015: Add operation duration tracking (logs database only)
+        await runMigration(path.join(migrationsDir, '015-add-operation-duration-tracking.sql'), 'logs');
+        
         console.log('\n=== Migration Summary ===');
         console.log('✓ All migrations completed successfully!');
         console.log('\nRun "npm run check-schema" to verify all schema elements are in place.');

@@ -181,11 +181,16 @@
     background: var(--bg-hover);
 }
 
-.recent-activity-job-code {
+.recent-activity-job-info {
     flex: 1;
+    min-width: 0;
+}
+
+.recent-activity-job-code {
     font-size: 0.75rem;
     font-weight: 600;
     color: var(--text-primary);
+    margin-bottom: 2px;
 }
 
 .recent-activity-time {
@@ -218,5 +223,128 @@
     font-style: italic;
     padding: var(--spacing-sm);
     text-align: center;
+}
+
+.loading-state,
+.error-state {
+    padding: var(--spacing-xl);
+    text-align: center;
+    color: var(--text-secondary);
+}
+
+.error-state {
+    color: var(--accent-error);
+}
+
+.machine-processing-section {
+    margin-top: var(--spacing-md);
+    padding-top: var(--spacing-md);
+    border-top: 1px solid var(--border-color);
+}
+
+.section-header {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-xs);
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: var(--spacing-sm);
+}
+
+.section-icon {
+    width: 14px;
+    height: 14px;
+}
+
+.section-icon.processing {
+    color: var(--accent-warning);
+}
+
+.job-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--spacing-sm);
+    padding: var(--spacing-sm);
+    background: var(--bg-tertiary);
+    border-radius: var(--radius-sm);
+    margin-bottom: var(--spacing-xs);
+}
+
+.job-item.processing {
+    background: rgba(245, 158, 11, 0.1);
+    border: 1px solid rgba(245, 158, 11, 0.2);
+}
+
+.job-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.job-id {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 2px;
+}
+
+.job-meta {
+    font-size: 0.7rem;
+    color: var(--text-tertiary);
+    display: flex;
+    gap: var(--spacing-xs);
+}
+
+.progress-ring-container {
+    position: relative;
+    flex-shrink: 0;
+}
+
+.progress-ring {
+    transform: rotate(-90deg);
+}
+
+.progress-ring-background {
+    fill: none;
+    stroke: var(--bg-hover);
+    stroke-width: 4;
+}
+
+.progress-ring-foreground {
+    fill: none;
+    stroke: var(--accent-primary);
+    stroke-width: 4;
+    stroke-linecap: round;
+    transition: stroke-dashoffset 0.3s ease;
+}
+
+.progress-ring-text {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 0.65rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.recent-activity-job-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.recent-activity-job-code {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 2px;
+}
+
+.recent-activity-time {
+    font-size: 0.7rem;
+    color: var(--text-tertiary);
 }
 

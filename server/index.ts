@@ -164,6 +164,142 @@ app.post('/api/scanned-codes', async (req, res) => {
     }
 });
 
+// Get production status by machine (last 5 completed + 1 processing per machine)
+app.get('/api/production-status', async (req, res) => {
+    try {
+        const client = await pool.connect();
+        try {
+            // Get completed operations (last 5 per machine) and processing operations (1 per machine)
+            // Count version_tags from file_ids in imposition_file_mapping
+            const result = await client.query(`
+                WITH job_version_counts AS (
+                    SELECT 
+                        jod.job_id,
+                        jod.machine_id,
+                        COUNT(DISTINCT jod.version_tag) as processed_versions,
+                        MAX(jod.operation_completed_at) as last_completed_at,
+                        MAX(jod.operation_started_at) as last_started_at,
+                        BOOL_AND(jod.operation_completed_at IS NOT NULL) as all_completed,
+                        MAX(jod.operation_id) as operation_id,
+                        MAX(jod.operation_duration_seconds) as duration_seconds
+                    FROM job_operation_duration jod
+                    WHERE jod.machine_id IS NOT NULL
+                    GROUP BY jod.job_id, jod.machine_id
+                ),
+                total_version_counts AS (
+                    SELECT 
+                        jvc.*,
+                        (
+                            SELECT COUNT(DISTINCT 
+                                SPLIT_PART(SPLIT_PART(ifm.file_id, '_', 2), '_', 1)
+                            )
+                            FROM imposition_file_mapping ifm
+                            WHERE ifm.file_id LIKE 'FILE\\_%\\_Labex\\_' || jvc.job_id || '\\_%' ESCAPE '\\'
+                        ) as total_versions
+                    FROM job_version_counts jvc
+                ),
+                completed_jobs AS (
+                    SELECT 
+                        machine_id,
+                        job_id,
+                        processed_versions,
+                        COALESCE(total_versions, processed_versions) as total_versions,
+                        last_completed_at,
+                        operation_id,
+                        duration_seconds,
+                        ROW_NUMBER() OVER (PARTITION BY machine_id ORDER BY last_completed_at DESC) as rn
+                    FROM total_version_counts
+                    WHERE all_completed = true
+                ),
+                processing_jobs AS (
+                    SELECT 
+                        machine_id,
+                        job_id,
+                        processed_versions,
+                        COALESCE(total_versions, processed_versions) as total_versions,
+                        last_started_at as last_completed_at,
+                        operation_id,
+                        duration_seconds,
+                        ROW_NUMBER() OVER (PARTITION BY machine_id ORDER BY last_started_at DESC) as rn
+                    FROM total_version_counts
+                    WHERE all_completed = false
+                )
+                SELECT 
+                    'completed' as status_type,
+                    machine_id,
+                    job_id,
+                    processed_versions,
+                    total_versions,
+                    last_completed_at,
+                    operation_id,
+                    duration_seconds
+                FROM completed_jobs
+                WHERE rn <= 5
+                
+                UNION ALL
+                
+                SELECT 
+                    'processing' as status_type,
+                    machine_id,
+                    job_id,
+                    processed_versions,
+                    total_versions,
+                    last_completed_at,
+                    operation_id,
+                    duration_seconds
+                FROM processing_jobs
+                WHERE rn = 1
+                
+                ORDER BY machine_id, status_type DESC, last_completed_at DESC;
+            `);
+            
+            // Group by machine_id
+            const grouped: Record<string, {
+                machine_id: string;
+                completed: any[];
+                processing: any[];
+            }> = {};
+            
+            result.rows.forEach((row: any) => {
+                if (!grouped[row.machine_id]) {
+                    grouped[row.machine_id] = {
+                        machine_id: row.machine_id,
+                        completed: [],
+                        processing: [],
+                    };
+                }
+                
+                const progress = row.total_versions > 0 
+                    ? Math.round((row.processed_versions / row.total_versions) * 100)
+                    : 100;
+                
+                const jobData = {
+                    job_id: row.job_id,
+                    processed_versions: parseInt(row.processed_versions) || 0,
+                    total_versions: parseInt(row.total_versions) || 0,
+                    last_completed_at: row.last_completed_at,
+                    operation_id: row.operation_id,
+                    duration_seconds: row.duration_seconds,
+                    progress,
+                };
+                
+                if (row.status_type === 'completed') {
+                    grouped[row.machine_id].completed.push(jobData);
+                } else {
+                    grouped[row.machine_id].processing.push(jobData);
+                }
+            });
+            
+            res.json(Object.values(grouped));
+        } finally {
+            client.release();
+        }
+    } catch (error: any) {
+        console.error('Error fetching production status:', error);
+        res.status(500).json({ error: 'Failed to fetch production status', message: error.message });
+    }
+});
+
 // Get jobs from jobmanager database with optional filters
 app.get('/api/jobs', async (req, res) => {
     try {
@@ -452,16 +588,25 @@ let processingInterval: NodeJS.Timeout | null = null;
 
 async function runProcessing() {
     console.log('\n[PROCESSING] Starting status update processing...');
+    const startTime = Date.now();
     try {
         const printOSResult = await processPrintOSRecords();
-        console.log(`[PROCESSING] Print OS: processed ${printOSResult.processed}, updated ${printOSResult.jobsUpdated} jobs`);
+        console.log(`[PROCESSING] Print OS: processed ${printOSResult.processed}, updated ${printOSResult.jobsUpdated} jobs, errors: ${printOSResult.errors.length}`);
+        if (printOSResult.errors.length > 0) {
+            console.log(`[PROCESSING] Print OS errors:`, printOSResult.errors.slice(0, 5));
+        }
         
         const scannerResult = await processScannedCodes();
-        console.log(`[PROCESSING] Scanner: processed ${scannerResult.processed}, updated ${scannerResult.jobsUpdated} jobs`);
+        console.log(`[PROCESSING] Scanner: processed ${scannerResult.processed}, updated ${scannerResult.jobsUpdated} jobs, errors: ${scannerResult.errors.length}`);
+        if (scannerResult.errors.length > 0) {
+            console.log(`[PROCESSING] Scanner errors:`, scannerResult.errors.slice(0, 5));
+        }
         
-        console.log('[PROCESSING] Processing completed\n');
-    } catch (error) {
-        console.error('[PROCESSING] Error during processing:', error);
+        const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+        console.log(`[PROCESSING] Processing completed in ${duration}s\n`);
+    } catch (error: any) {
+        console.error('[PROCESSING] Error during processing:', error.message);
+        console.error('[PROCESSING] Stack:', error.stack);
     }
 }
 

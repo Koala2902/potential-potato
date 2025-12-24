@@ -53,6 +53,30 @@ export async function fetchMachines(): Promise<Machine[]> {
     return response.json();
 }
 
+export interface ProductionStatus {
+    machine_id: string;
+    completed: ProductionJob[];
+    processing: ProductionJob[];
+}
+
+export interface ProductionJob {
+    job_id: string;
+    processed_versions: number;
+    total_versions: number;
+    last_completed_at: string;
+    operation_id: string;
+    duration_seconds: number | null;
+    progress: number;
+}
+
+export async function fetchProductionStatus(): Promise<ProductionStatus[]> {
+    const response = await fetch(`${API_BASE_URL}/production-status`);
+    if (!response.ok) {
+        throw new Error('Failed to fetch production status');
+    }
+    return response.json();
+}
+
 export interface Operation {
     operation_id: string;
     operation_name: string;
