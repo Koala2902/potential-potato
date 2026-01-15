@@ -77,6 +77,11 @@ export interface Machine {
   code: string;
   type: string;
   status: 'active' | 'maintenance' | 'inactive';
+  // Extended fields from API
+  machine_id?: string;
+  machine_name?: string;
+  machine_type?: string;
+  availability_status?: string;
 }
 
 export interface ScheduledJob {

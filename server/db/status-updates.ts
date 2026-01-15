@@ -483,6 +483,35 @@ async function updatePrintOSDuration(
             }
         }
         
+        // Format timestamps as Australian local time strings for storage
+        // This ensures PostgreSQL stores them as Australian time, not UTC
+        const formatAuTimestamp = (date: Date | null): string | null => {
+            if (!date) return null;
+            const formatter = new Intl.DateTimeFormat('en-AU', {
+                timeZone: 'Australia/Sydney',
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+                hour12: false
+            });
+            
+            const parts = formatter.formatToParts(date);
+            const year = parts.find(p => p.type === 'year')?.value;
+            const month = parts.find(p => p.type === 'month')?.value;
+            const day = parts.find(p => p.type === 'day')?.value;
+            const hour = parts.find(p => p.type === 'hour')?.value;
+            const minute = parts.find(p => p.type === 'minute')?.value;
+            const second = parts.find(p => p.type === 'second')?.value;
+            
+            return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
+        };
+        
+        const startedAtString = formatAuTimestamp(startedAt);
+        const completedAtString = formatAuTimestamp(completedAt);
+        
         // Insert or update job_operation_duration record
         // Set machine_id to HP_INDIGO_6900 for Print OS records
         await client.query(`
@@ -503,7 +532,7 @@ async function updatePrintOSDuration(
                 operation_started_at = COALESCE(EXCLUDED.operation_started_at, job_operation_duration.operation_started_at),
                 operation_completed_at = COALESCE(EXCLUDED.operation_completed_at, job_operation_duration.operation_completed_at),
                 updated_at = NOW();
-        `, [jobId, versionTag, operationId, durationSeconds, startedAt, completedAt]);
+        `, [jobId, versionTag, operationId, durationSeconds, startedAtString, completedAtString]);
         
     } catch (error: any) {
         // Log but don't fail - duration update is optional
@@ -747,7 +776,20 @@ export async function processPrintOSRecords(): Promise<{
             try {
                 const name = record.name;
                 const status = record.status === 'PRINTED' ? 'completed' : 'aborted';
-                const completedAt = record.job_complete_time || new Date();
+                
+                // job_complete_time from Print OS is already in Australian local time
+                // PostgreSQL returns it as a Date object
+                // Keep it as Date for use in functions, but format as string when storing
+                let completedAt: Date;
+                if (record.job_complete_time) {
+                    if (record.job_complete_time instanceof Date) {
+                        completedAt = record.job_complete_time;
+                    } else {
+                        completedAt = new Date(record.job_complete_time);
+                    }
+                } else {
+                    completedAt = new Date();
+                }
 
                 // Check if this is a manual prepress file (Labex_<job_id> format)
                 const manualFile = parseManualPrepressFile(name);

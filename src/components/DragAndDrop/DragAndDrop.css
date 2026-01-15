@@ -1,0 +1,226 @@
+.draggable-imposition {
+    padding: var(--spacing-sm) var(--spacing-md);
+    margin: var(--spacing-xs);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    cursor: grab;
+    transition: all var(--transition-base);
+    user-select: none;
+}
+
+.draggable-imposition:active {
+    cursor: grabbing;
+}
+
+.draggable-imposition:hover {
+    background: var(--bg-hover);
+    border-color: var(--divider-color);
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-sm);
+}
+
+.draggable-imposition.active {
+    background: rgba(99, 102, 241, 0.15);
+    border-color: var(--accent-primary);
+    box-shadow: 0 0 0 1px var(--accent-primary);
+}
+
+.draggable-imposition.dragging {
+    opacity: 0.5;
+    cursor: grabbing;
+    transform: rotate(2deg);
+}
+
+.imposition-name {
+    font-weight: 600;
+    color: var(--text-primary);
+    font-size: 0.875rem;
+    margin-bottom: 2px;
+}
+
+.imposition-id {
+    font-size: 0.7rem;
+    color: var(--text-tertiary);
+    font-family: 'Courier New', monospace;
+    word-break: break-all;
+}
+
+.draggable-runlist {
+    margin-bottom: var(--spacing-md);
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    cursor: grab;
+    transition: all var(--transition-base);
+}
+
+.draggable-runlist:active {
+    cursor: grabbing;
+}
+
+.draggable-runlist:hover {
+    border-color: var(--divider-color);
+    box-shadow: var(--shadow-sm);
+}
+
+.draggable-runlist.dragging {
+    opacity: 0.5;
+    cursor: grabbing;
+    transform: rotate(1deg);
+}
+
+.runlist-header {
+    padding: var(--spacing-md);
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    cursor: pointer;
+    user-select: none;
+}
+
+.runlist-toggle {
+    display: flex;
+    align-items: center;
+    color: var(--text-secondary);
+    flex-shrink: 0;
+}
+
+.runlist-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.runlist-id {
+    font-weight: 600;
+    color: var(--text-primary);
+    font-size: 0.875rem;
+    margin-bottom: 2px;
+}
+
+.runlist-count {
+    font-size: 0.75rem;
+    color: var(--text-tertiary);
+}
+
+.runlist-children {
+    padding: var(--spacing-xs);
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-xs);
+    border-top: 1px solid var(--border-color);
+    margin-top: var(--spacing-xs);
+}
+
+.machine-drop-zone {
+    min-height: 400px;
+    background: var(--bg-secondary);
+    border: 2px dashed var(--border-color);
+    border-radius: var(--radius-lg);
+    padding: var(--spacing-md);
+    transition: all var(--transition-base);
+    position: relative;
+}
+
+.machine-drop-zone.drag-over {
+    border-color: var(--accent-primary);
+    background: rgba(99, 102, 241, 0.05);
+    border-style: solid;
+    box-shadow: 0 0 20px rgba(99, 102, 241, 0.2);
+}
+
+.machine-drop-header {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-md);
+    padding-bottom: var(--spacing-md);
+    margin-bottom: var(--spacing-md);
+    border-bottom: 1px solid var(--border-color);
+}
+
+.machine-drop-icon {
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(99, 102, 241, 0.1);
+    border-radius: var(--radius-md);
+    color: var(--accent-primary);
+    flex-shrink: 0;
+}
+
+.machine-drop-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.machine-drop-name {
+    font-weight: 600;
+    color: var(--text-primary);
+    font-size: 1rem;
+    margin-bottom: 2px;
+}
+
+.machine-drop-code {
+    font-size: 0.75rem;
+    color: var(--text-tertiary);
+}
+
+.machine-drop-content {
+    min-height: 300px;
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-xs);
+}
+
+.machine-drop-content:empty::before {
+    content: 'Drop jobs or runlists here';
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--text-tertiary);
+    font-size: 0.875rem;
+    font-style: italic;
+}
+
+.drop-indicator {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: var(--accent-primary);
+    color: white;
+    padding: var(--spacing-md) var(--spacing-lg);
+    border-radius: var(--radius-lg);
+    font-weight: 600;
+    font-size: 0.875rem;
+    box-shadow: var(--shadow-lg);
+    z-index: 100;
+    pointer-events: none;
+    animation: pulse 1s infinite;
+}
+
+@keyframes pulse {
+    0%, 100% {
+        opacity: 1;
+        transform: translate(-50%, -50%) scale(1);
+    }
+    50% {
+        opacity: 0.9;
+        transform: translate(-50%, -50%) scale(1.05);
+    }
+}
+
+.machine-status-badge {
+    padding: 4px 8px;
+    background: rgba(245, 158, 11, 0.2);
+    color: var(--accent-warning);
+    border-radius: var(--radius-sm);
+    font-size: 0.7rem;
+    font-weight: 600;
+    flex-shrink: 0;
+}
+

@@ -156,3 +156,24 @@ export async function fetchJobs(filters?: JobFilterOptions): Promise<any[]> {
     return response.json();
 }
 
+export async function assignToMachine(
+    type: 'imposition' | 'runlist',
+    id: string,
+    machineId: string
+): Promise<void> {
+    const response = await fetch(`${API_BASE_URL}/assign-to-machine`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            type,
+            id,
+            machineId,
+        }),
+    });
+    if (!response.ok) {
+        throw new Error('Failed to assign to machine');
+    }
+}
+

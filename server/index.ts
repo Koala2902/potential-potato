@@ -177,8 +177,25 @@ app.get('/api/production-status', async (req, res) => {
                         jod.job_id,
                         jod.machine_id,
                         COUNT(DISTINCT jod.version_tag) as processed_versions,
-                        MAX(jod.operation_completed_at) as last_completed_at,
-                        MAX(jod.operation_started_at) as last_started_at,
+                        -- operation_completed_at is stored as TIMESTAMP (no timezone) representing Australian local time
+                        -- We need to convert it properly: treat the stored value as Australian time, then convert to UTC
+                        -- The stored value like '2026-01-15 15:13:13' should be interpreted as Australian time
+                        -- AT TIME ZONE converts: Australian time -> UTC (subtracts 11 hours for AEDT)
+                        MAX(
+                            CASE 
+                                WHEN jod.operation_completed_at IS NOT NULL 
+                                -- First convert timestamp to text, then to timestamptz treating it as Australia/Sydney
+                                THEN timezone('UTC', jod.operation_completed_at AT TIME ZONE 'Australia/Sydney')
+                                ELSE NULL
+                            END
+                        ) as last_completed_at,
+                        MAX(
+                            CASE 
+                                WHEN jod.operation_started_at IS NOT NULL 
+                                THEN timezone('UTC', jod.operation_started_at AT TIME ZONE 'Australia/Sydney')
+                                ELSE NULL
+                            END
+                        ) as last_started_at,
                         BOOL_AND(jod.operation_completed_at IS NOT NULL) as all_completed,
                         MAX(jod.operation_id) as operation_id,
                         MAX(jod.operation_duration_seconds) as duration_seconds
@@ -273,11 +290,18 @@ app.get('/api/production-status', async (req, res) => {
                     ? Math.round((row.processed_versions / row.total_versions) * 100)
                     : 100;
                 
+                // Convert timestamptz to ISO string for proper timezone handling in frontend
+                // The timestamp from the query is already converted to UTC (timestamptz)
+                // So we just need to convert it to ISO string
+                const lastCompletedAt = row.last_completed_at 
+                    ? new Date(row.last_completed_at).toISOString()
+                    : null;
+                
                 const jobData = {
                     job_id: row.job_id,
                     processed_versions: parseInt(row.processed_versions) || 0,
                     total_versions: parseInt(row.total_versions) || 0,
-                    last_completed_at: row.last_completed_at,
+                    last_completed_at: lastCompletedAt,
                     operation_id: row.operation_id,
                     duration_seconds: row.duration_seconds,
                     progress,
@@ -297,6 +321,267 @@ app.get('/api/production-status', async (req, res) => {
     } catch (error: any) {
         console.error('Error fetching production status:', error);
         res.status(500).json({ error: 'Failed to fetch production status', message: error.message });
+    }
+});
+
+// Update runlist status (updates all jobs in the runlist)
+app.put('/api/runlists/:runlistId/status', async (req, res) => {
+    try {
+        const { runlistId } = req.params;
+        const { status } = req.body;
+
+        if (!status) {
+            return res.status(400).json({ error: 'Status is required' });
+        }
+
+        const validStatuses = ['print_ready', 'printed', 'digital_cut', 'slitter', 'production_finished'];
+        if (!validStatuses.includes(status)) {
+            return res.status(400).json({ error: `Invalid status. Must be one of: ${validStatuses.join(', ')}` });
+        }
+
+        const client = await pool.connect();
+        try {
+            // Get all job_ids in this runlist
+            const runlistJobsResult = await client.query(`
+                SELECT DISTINCT 
+                    SPLIT_PART(SPLIT_PART(ifm.file_id, '_', 2), '_', 1) as version_tag,
+                    SUBSTRING(ifm.file_id FROM 'FILE_\\d+_Labex_(.+?)_') as job_id
+                FROM imposition_file_mapping ifm
+                INNER JOIN production_planner_paths ppp ON ifm.imposition_id = ppp.imposition_id
+                WHERE ppp.runlist_id = $1
+                AND ifm.file_id LIKE 'FILE_%_Labex_%'
+            `, [runlistId]);
+
+            // Group by job_id and collect version_tags
+            const jobVersionMap = new Map<string, string[]>();
+            runlistJobsResult.rows.forEach((row) => {
+                const jobId = row.job_id;
+                const versionTag = row.version_tag;
+                if (jobId && versionTag) {
+                    if (!jobVersionMap.has(jobId)) {
+                        jobVersionMap.set(jobId, []);
+                    }
+                    if (!jobVersionMap.get(jobId)!.includes(versionTag)) {
+                        jobVersionMap.get(jobId)!.push(versionTag);
+                    }
+                }
+            });
+
+            const jobIds = Array.from(jobVersionMap.keys());
+            console.log(`[PUT /api/runlists/:runlistId/status] Found ${jobIds.length} jobs in runlist ${runlistId}`);
+
+            if (jobIds.length === 0) {
+                return res.status(404).json({ error: `No jobs found in runlist ${runlistId}` });
+            }
+
+            // Update each job
+            const { recordScannedCode } = await import('./db/jobmanager-queries.js');
+            const statusToOperations: Record<string, string[]> = {
+                'print_ready': [],
+                'printed': ['op001'],
+                'digital_cut': ['op002'],
+                'slitter': ['op003'],
+                'production_finished': ['op004'],
+            };
+
+            const requiredOperations = statusToOperations[status];
+            const scannedCodes = [];
+
+            for (const jobId of jobIds) {
+                const versionTags = jobVersionMap.get(jobId) || [];
+                
+                for (const versionTag of versionTags) {
+                    const codeText = `${jobId}_${versionTag}`;
+                    const operationsObj = { operations: requiredOperations };
+
+                    try {
+                        const scannedCode = await recordScannedCode(
+                            codeText,
+                            null,
+                            null,
+                            operationsObj,
+                            { 
+                                source: 'job_status_page',
+                                status_update: status,
+                                runlist_id: runlistId,
+                                timestamp: new Date().toISOString()
+                            }
+                        );
+                        scannedCodes.push(scannedCode);
+                    } catch (err: any) {
+                        console.warn(`Failed to create scanned code for ${codeText}:`, err.message);
+                    }
+                }
+            }
+
+            // Process scanned codes in background
+            const { processScannedCodes } = await import('./db/status-updates.js');
+            processScannedCodes().catch(err => 
+                console.warn('Error processing scanned codes after runlist update:', err)
+            );
+
+            res.json({ 
+                success: true, 
+                runlistId, 
+                status,
+                jobsUpdated: jobIds.length,
+                scannedCodesCreated: scannedCodes.length
+            });
+        } finally {
+            client.release();
+        }
+    } catch (error) {
+        console.error('Error updating runlist status:', error);
+        res.status(500).json({ error: 'Failed to update runlist status' });
+    }
+});
+
+// Update job status by creating scanned codes for appropriate operations
+app.put('/api/jobs/:jobId/status', async (req, res) => {
+    try {
+        let { jobId } = req.params;
+        const { status } = req.body;
+        
+        // Log the incoming jobId for debugging
+        console.log(`[PUT /api/jobs/:jobId/status] Received jobId: "${jobId}", status: "${status}"`);
+
+        if (!status) {
+            return res.status(400).json({ error: 'Status is required' });
+        }
+
+        const validStatuses = ['print_ready', 'printed', 'digital_cut', 'slitter', 'production_finished'];
+        if (!validStatuses.includes(status)) {
+            return res.status(400).json({ error: `Invalid status. Must be one of: ${validStatuses.join(', ')}` });
+        }
+
+        // Map status to operation IDs
+        // Status is determined by operations: op001=printed, op002=digital_cut, op003=slitter, op004=production_finished
+        const statusToOperations: Record<string, string[]> = {
+            'print_ready': [], // No operations
+            'printed': ['op001'],
+            'digital_cut': ['op002'],
+            'slitter': ['op003'], // Note: slitter can also be op002+op003, but we'll use op003
+            'production_finished': ['op004'],
+        };
+
+        const requiredOperations = statusToOperations[status];
+        
+        // If print_ready, we don't need to create any scans (just return success)
+        if (status === 'print_ready') {
+            return res.json({ success: true, jobId, status, note: 'No operations needed for print_ready' });
+        }
+
+        const client = await pool.connect();
+        try {
+            // Get all version_tags for this job from job_operations table (most reliable source)
+            // Also try to get from file_ids as fallback
+            let versionTags: string[] = [];
+            
+            // Method 1: Get from job_operations (most reliable)
+            const jobOpsResult = await client.query(`
+                SELECT DISTINCT version_tag
+                FROM job_operations
+                WHERE job_id = $1
+                ORDER BY version_tag
+            `, [jobId]);
+            
+            versionTags = jobOpsResult.rows.map(row => row.version_tag).filter(Boolean);
+            
+            // Method 2: If no version_tags found in job_operations, try to get from file_ids
+            if (versionTags.length === 0) {
+                console.log(`No version_tags in job_operations for job ${jobId}, trying file_ids...`);
+                const fileIdsResult = await client.query(`
+                    SELECT DISTINCT 
+                        SPLIT_PART(SPLIT_PART(file_id, '_', 2), '_', 1) as version_tag
+                    FROM imposition_file_mapping
+                    WHERE file_id LIKE $1
+                `, [`FILE_%_Labex_${jobId}_%`]);
+                
+                versionTags = fileIdsResult.rows.map(row => row.version_tag).filter(Boolean);
+            }
+            
+            // Method 3: If still no version_tags, try parsing from scanned_codes
+            if (versionTags.length === 0) {
+                console.log(`No version_tags in file_ids for job ${jobId}, trying scanned_codes...`);
+                const scannedCodesResult = await client.query(`
+                    SELECT DISTINCT 
+                        SPLIT_PART(code_text, '_', 3) as version_tag
+                    FROM scanned_codes
+                    WHERE code_text LIKE $1
+                    AND code_text ~ '^\\d+_\\d+_\\d+$'
+                `, [`${jobId}_%`]);
+                
+                versionTags = scannedCodesResult.rows.map(row => row.version_tag).filter(Boolean);
+            }
+
+            if (versionTags.length === 0) {
+                // If still no version_tags, use a default version_tag of "1"
+                console.warn(`No version_tags found for job ${jobId}, using default version_tag "1"`);
+                versionTags = ['1'];
+            }
+            
+            console.log(`Found ${versionTags.length} version_tags for job ${jobId}:`, versionTags);
+
+            // Create scanned codes for each version_tag and each required operation
+            const { recordScannedCode } = await import('./db/jobmanager-queries.js');
+            const scannedCodes = [];
+
+            for (const versionTag of versionTags) {
+                // Format code_text as job_id_version_tag (e.g., "4677_5995_1")
+                const codeText = `${jobId}_${versionTag}`;
+
+                // Create operations object - format: { "operations": ["op001", "op002", ...] }
+                // This matches what processScannedCodes expects
+                const operationsObj = {
+                    operations: requiredOperations
+                };
+
+                try {
+                    // Create scanned code with all required operations at once
+                    const scannedCode = await recordScannedCode(
+                        codeText,
+                        null, // machineId - not required for status update
+                        null, // userId - not required
+                        operationsObj, // operations object: { "operations": ["op001", ...] }
+                        { 
+                            source: 'job_status_page',
+                            status_update: status,
+                            timestamp: new Date().toISOString()
+                        }
+                    );
+                    scannedCodes.push(scannedCode);
+                } catch (err: any) {
+                    console.warn(`Failed to create scanned code for ${codeText}:`, err.message);
+                    // Continue with other version tags
+                }
+            }
+
+            // Process scanned codes immediately to update job_operations
+            const { processScannedCodes } = await import('./db/status-updates.js');
+            let processResult = null;
+            try {
+                processResult = await processScannedCodes();
+                console.log(`[PUT /api/jobs/:jobId/status] Processed scanned codes:`, processResult);
+            } catch (processError: any) {
+                console.warn('Error processing scanned codes after status update:', processError?.message || processError);
+                // Don't fail the request - codes are recorded, they'll be processed later
+            }
+
+            res.json({ 
+                success: true, 
+                jobId, 
+                status,
+                scannedCodesCreated: scannedCodes.length,
+                versionTagsProcessed: versionTags.length,
+                versionTags: versionTags,
+                processResult: processResult
+            });
+        } finally {
+            client.release();
+        }
+    } catch (error) {
+        console.error('Error updating job status:', error);
+        res.status(500).json({ error: 'Failed to update job status' });
     }
 });
 
@@ -545,6 +830,120 @@ app.post('/api/scan', async (req, res) => {
     } catch (error) {
         console.error('Error processing scan:', error);
         res.status(500).json({ error: 'Failed to process scan' });
+    }
+});
+
+// Get machine assignments
+app.get('/api/machine-assignments', async (req, res) => {
+    try {
+        const client = await pool.connect();
+        try {
+            // Check if table exists, if not return empty array
+            const tableCheck = await client.query(`
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name = 'imposition_machine_assignments'
+                );
+            `);
+
+            if (!tableCheck.rows[0].exists) {
+                return res.json([]);
+            }
+
+            const result = await client.query(`
+                SELECT imposition_id, machine_id, assigned_at, updated_at
+                FROM imposition_machine_assignments
+                ORDER BY assigned_at DESC
+            `);
+
+            res.json(result.rows);
+        } finally {
+            client.release();
+        }
+    } catch (error) {
+        console.error('Error fetching machine assignments:', error);
+        res.status(500).json({ error: 'Failed to fetch machine assignments' });
+    }
+});
+
+// Assign imposition or runlist to machine
+app.post('/api/assign-to-machine', async (req, res) => {
+    try {
+        const { type, id, machineId } = req.body;
+
+        if (!type || !id || !machineId) {
+            return res.status(400).json({ error: 'type, id, and machineId are required' });
+        }
+
+        if (type !== 'imposition' && type !== 'runlist') {
+            return res.status(400).json({ error: 'type must be "imposition" or "runlist"' });
+        }
+
+        const client = await pool.connect();
+        try {
+            // Ensure table exists
+            await client.query(`
+                CREATE TABLE IF NOT EXISTS imposition_machine_assignments (
+                    imposition_id TEXT PRIMARY KEY,
+                    machine_id TEXT NOT NULL,
+                    assigned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            `);
+
+            await client.query(`
+                CREATE INDEX IF NOT EXISTS idx_imposition_machine_assignments_machine_id 
+                ON imposition_machine_assignments(machine_id);
+            `);
+
+            if (type === 'imposition') {
+                // Update or insert machine assignment for imposition
+                await client.query(
+                    `
+                    INSERT INTO imposition_machine_assignments (imposition_id, machine_id, assigned_at, updated_at)
+                    VALUES ($1, $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    ON CONFLICT (imposition_id) 
+                    DO UPDATE SET 
+                        machine_id = $2,
+                        updated_at = CURRENT_TIMESTAMP
+                `,
+                    [id, machineId]
+                );
+            } else if (type === 'runlist') {
+                // Get all impositions in the runlist
+                const runlistResult = await client.query(
+                    `
+                    SELECT imposition_id
+                    FROM production_planner_paths
+                    WHERE runlist_id = $1
+                `,
+                    [id]
+                );
+
+                // Assign all impositions to the machine
+                for (const row of runlistResult.rows) {
+                    await client.query(
+                        `
+                        INSERT INTO imposition_machine_assignments (imposition_id, machine_id, assigned_at, updated_at)
+                        VALUES ($1, $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        ON CONFLICT (imposition_id) 
+                        DO UPDATE SET 
+                            machine_id = $2,
+                            updated_at = CURRENT_TIMESTAMP
+                    `,
+                        [row.imposition_id, machineId]
+                    );
+                }
+            }
+
+            res.json({ success: true, message: `Assigned ${type} to machine` });
+        } finally {
+            client.release();
+        }
+    } catch (error) {
+        console.error('Error assigning to machine:', error);
+        res.status(500).json({ error: 'Failed to assign to machine' });
     }
 });
 

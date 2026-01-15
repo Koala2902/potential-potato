@@ -1,6 +1,9 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useCallback, memo } from 'react';
+import { useDroppable } from '@dnd-kit/core';
 import { Job, JobStatusCardConfig, GroupedJobs } from '../../types';
 import { ChevronDown, ChevronRight, Package, Printer, Scissors, Minus, CheckCircle2 } from 'lucide-react';
+import DraggableJobItem from './DraggableJobItem';
+import DraggableRunlistGroup from './DraggableRunlistGroup';
 import './JobStatusCard.css';
 
 // Icon mapping for dynamic icon rendering
@@ -18,6 +21,13 @@ interface JobStatusCardProps {
 }
 
 export default function JobStatusCard({ config, jobs }: JobStatusCardProps) {
+  const { isOver, setNodeRef } = useDroppable({
+    id: config.status,
+    data: {
+      type: 'status-column',
+      status: config.status,
+    },
+  });
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
 
   // Filter jobs based on filter rule
@@ -104,36 +114,50 @@ export default function JobStatusCard({ config, jobs }: JobStatusCardProps) {
     });
   }, [filteredJobs, config.groupBy, config.sortBy]);
 
-  const toggleGroup = (groupKey: string) => {
-    const newExpanded = new Set(expandedGroups);
-    if (newExpanded.has(groupKey)) {
-      newExpanded.delete(groupKey);
-    } else {
-      newExpanded.add(groupKey);
-    }
-    setExpandedGroups(newExpanded);
-  };
+  const toggleGroup = useCallback((groupKey: string) => {
+    setExpandedGroups((prev) => {
+      const newExpanded = new Set(prev);
+      if (newExpanded.has(groupKey)) {
+        newExpanded.delete(groupKey);
+      } else {
+        newExpanded.add(groupKey);
+      }
+      return newExpanded;
+    });
+  }, []);
 
   // Get icon component dynamically
   const IconComponent = iconMap[config.icon] || Package;
 
-  const formatDateShort = (dateString: string) => {
-    const date = new Date(dateString);
-    return date.toLocaleDateString('en-US', { 
-      month: 'short', 
-      day: 'numeric'
-    });
-  };
+  const formatDateShort = useCallback((dateString: string) => {
+    if (!dateString) return 'N/A';
+    try {
+      const date = new Date(dateString);
+      if (isNaN(date.getTime())) return 'Invalid Date';
+      return date.toLocaleDateString('en-US', { 
+        month: 'short', 
+        day: 'numeric'
+      });
+    } catch {
+      return 'Invalid Date';
+    }
+  }, []);
 
-  const formatDateTime = (dateString: string) => {
-    const date = new Date(dateString);
-    return date.toLocaleString('en-US', { 
-      month: 'short', 
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    });
-  };
+  const formatDateTime = useCallback((dateString: string) => {
+    if (!dateString) return 'N/A';
+    try {
+      const date = new Date(dateString);
+      if (isNaN(date.getTime())) return 'Invalid Date';
+      return date.toLocaleString('en-US', { 
+        month: 'short', 
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+    } catch {
+      return 'Invalid Date';
+    }
+  }, []);
 
   // Check if this is the production_finished card
   const isProductionFinished = config.status === 'production_finished';
@@ -152,7 +176,10 @@ export default function JobStatusCard({ config, jobs }: JobStatusCardProps) {
   };
 
   return (
-    <div className="job-status-card">
+    <div 
+      ref={setNodeRef}
+      className={`job-status-card ${isOver ? 'drag-over' : ''}`}
+    >
       <div className="job-status-card-header">
         <div className="card-title-section">
           <IconComponent size={20} className="card-icon" />
@@ -206,132 +233,35 @@ export default function JobStatusCard({ config, jobs }: JobStatusCardProps) {
 
             return (
               <div key={group.groupKey} className="job-group">
-                <div
-                  className="group-header"
-                  onClick={() => toggleGroup(group.groupKey)}
-                >
-                  <div className="group-toggle">
-                    {isExpanded ? (
-                      <ChevronDown size={18} />
-                    ) : (
-                      <ChevronRight size={18} />
-                    )}
-                  </div>
-                  {isRunlistGroup && (
-                    <div className="group-progress-ring">
-                      {progressPercentage === 100 ? (
-                        <div className="progress-ring-complete">
-                          <span>{processedJobs}</span>
-                        </div>
-                      ) : (
-                        <>
-                          <svg className="progress-ring" viewBox="0 0 36 36">
-                            <circle
-                              className="progress-ring-bg"
-                              cx="18"
-                              cy="18"
-                              r="16"
-                              fill="none"
-                              stroke="currentColor"
-                              strokeWidth="2"
-                            />
-                            <circle
-                              className="progress-ring-progress"
-                              cx="18"
-                              cy="18"
-                              r="16"
-                              fill="none"
-                              stroke="var(--accent-primary)"
-                              strokeWidth="2"
-                              strokeDasharray={`${(progressPercentage / 100) * 100.53}, 100.53`}
-                              strokeDashoffset="0"
-                              strokeLinecap="round"
-                              transform="rotate(-90 18 18)"
-                            />
-                          </svg>
-                          <span className="progress-text">{processedJobs}/{totalJobs}</span>
-                        </>
-                      )}
-                    </div>
-                  )}
-                  <div className="group-info">
-                    <div className="group-name">
-                      {isRunlistGroup ? `Runlist ${formatGroupKey(group.groupKey)}` : formatGroupKey(group.groupKey)}
-                      {isRunlistGroup && maxStatus > 1 && (
-                        <span className="group-status-badge">{statusNames[maxStatus]}</span>
-                      )}
-                    </div>
-                    <div className="group-meta">
-                      {group.jobs.length} {group.jobs.length === 1 ? 'job' : 'jobs'} • {totalQty.toLocaleString()} units
-                    </div>
-                  </div>
-                </div>
+                <DraggableRunlistGroup
+                  group={group}
+                  isExpanded={isExpanded}
+                  onToggle={() => toggleGroup(group.groupKey)}
+                  isRunlistGroup={isRunlistGroup}
+                  formatGroupKey={formatGroupKey}
+                  getMaxStatus={getMaxStatus}
+                  statusNames={statusNames}
+                  processedJobs={processedJobs}
+                  totalJobs={totalJobs}
+                  progressPercentage={progressPercentage}
+                  totalQty={totalQty}
+                />
 
                 {isExpanded && (
                   <div className="group-jobs">
                     {group.jobs.map((job) => {
-                      const totalVersions = job.totalVersions || 0;
-                      const completedVersions = job.completedVersions || 0;
-                      const percentage = totalVersions > 0 ? (completedVersions / totalVersions) * 100 : 0;
-                      const isComplete = totalVersions > 0 && completedVersions === totalVersions;
                       const isProcessed = job.currentStatus !== 'print_ready';
                       const isGreyedOut = isRunlistGroup && !isProcessed;
                       
                       return (
-                        <div key={job.id} className={`job-item ${isGreyedOut ? 'job-item-greyed' : ''}`}>
-                          <div className="job-item-line">
-                            <span className="job-id">{job.jobCode}</span>
-                            {totalVersions > 1 && (
-                              <div className={`version-indicator ${isComplete ? 'complete' : ''}`}>
-                                {isComplete ? (
-                                  <span className="version-text">{completedVersions}</span>
-                                ) : (
-                                  <>
-                                    <svg className="version-ring" viewBox="0 0 36 36">
-                                      <circle
-                                        className="version-ring-bg"
-                                        cx="18"
-                                        cy="18"
-                                        r="16"
-                                        fill="none"
-                                        stroke="currentColor"
-                                        strokeWidth="2"
-                                      />
-                                      <circle
-                                        className="version-ring-progress"
-                                        cx="18"
-                                        cy="18"
-                                        r="16"
-                                        fill="none"
-                                        stroke="var(--accent-primary)"
-                                        strokeWidth="2"
-                                        strokeDasharray={`${(percentage / 100) * 100.53}, 100.53`}
-                                        strokeDashoffset="0"
-                                        strokeLinecap="round"
-                                        transform="rotate(-90 18 18)"
-                                      />
-                                    </svg>
-                                    <span className="version-text">{completedVersions}/{totalVersions}</span>
-                                  </>
-                                )}
-                              </div>
-                            )}
-                            <span className="job-date-separator">•</span>
-                            {isProductionFinished && job.completedAt ? (
-                              <>
-                                <span className="job-finished-date">Finished: {formatDateTime(job.completedAt)}</span>
-                                <span className="job-date-separator">•</span>
-                                <span className="job-due-date">Due: {formatDateShort(job.dueDate)}</span>
-                              </>
-                            ) : (
-                              <>
-                                <span className="job-order-date">Order: {formatDateShort(job.createdAt)}</span>
-                                <span className="job-date-separator">•</span>
-                                <span className="job-due-date">Due: {formatDateShort(job.dueDate)}</span>
-                              </>
-                            )}
-                          </div>
-                        </div>
+                        <DraggableJobItem
+                          key={job.id}
+                          job={job}
+                          isGreyedOut={isGreyedOut}
+                          isProductionFinished={isProductionFinished}
+                          formatDateShort={formatDateShort}
+                          formatDateTime={formatDateTime}
+                        />
                       );
                     })}
                   </div>

@@ -7,11 +7,17 @@
     flex-direction: column;
     height: 100%;
     box-shadow: var(--shadow-sm);
-    transition: box-shadow 0.2s ease;
+    transition: all 0.2s ease;
 }
 
 .job-status-card:hover {
     box-shadow: var(--shadow-md);
+}
+
+.job-status-card.drag-over {
+    border-color: var(--accent-primary);
+    background: rgba(99, 102, 241, 0.05);
+    box-shadow: 0 0 20px rgba(99, 102, 241, 0.2);
 }
 
 .job-status-card-header {
@@ -69,6 +75,12 @@
     display: flex;
     flex-direction: column;
     gap: var(--spacing-sm);
+    /* Performance optimizations */
+    will-change: scroll-position;
+    contain: layout style paint;
+    /* Smooth scrolling */
+    scroll-behavior: smooth;
+    -webkit-overflow-scrolling: touch;
 }
 
 .empty-groups {

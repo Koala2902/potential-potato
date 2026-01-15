@@ -62,14 +62,30 @@ export default function ProductionPage() {
     };
 
     const formatTimeAgo = (dateString: string): string => {
+        if (!dateString) return 'N/A';
+        
         const date = new Date(dateString);
+        // Check if date is valid
+        if (isNaN(date.getTime())) {
+            console.warn('Invalid date string:', dateString);
+            return 'Invalid date';
+        }
+        
         const now = new Date();
         const diffMs = now.getTime() - date.getTime();
+        
+        // Handle future dates (shouldn't happen, but just in case)
+        if (diffMs < 0) {
+            return 'Just now';
+        }
+        
+        const diffSecs = Math.floor(diffMs / 1000);
         const diffMins = Math.floor(diffMs / (1000 * 60));
         const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
         const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
 
-        if (diffMins < 1) return 'Just now';
+        // "Just now" for anything less than 1 minute (0-59 seconds)
+        if (diffSecs < 60) return 'Just now';
         if (diffMins < 60) return `${diffMins}m ago`;
         if (diffHours < 24) return `${diffHours}h ago`;
         return `${diffDays}d ago`;

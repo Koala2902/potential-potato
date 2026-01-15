@@ -1,313 +1,526 @@
-import { useState, useEffect } from 'react';
-import { Activity, Settings, X } from 'lucide-react';
-import { Job, JobStatusCardConfig } from '../../types';
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import {
+    DndContext,
+    DragEndEvent,
+    DragOverlay,
+    DragStartEvent,
+    PointerSensor,
+    useSensor,
+    useSensors,
+    closestCenter,
+} from '@dnd-kit/core';
+import { Job, JobStatusCategory, JobStatusCardConfig } from '../../types';
+import { fetchJobs } from '../../services/api';
 import JobStatusCard from '../../components/JobStatusCard/JobStatusCard';
-import { fetchJobs, JobFilterOptions } from '../../services/api';
+import { Loader2 } from 'lucide-react';
 import './JobStatusPage.css';
 
-// Map database job to frontend Job interface
-function mapDbJobToJob(dbJob: any): Job {
-    // Map status from backend status to frontend status
-    const statusMap: Record<string, 'pending' | 'started' | 'completed'> = {
-        'print_ready': 'pending',
-        'printed': 'started',
-        'digital_cut': 'started',
-        'slitter': 'started',
-        'production_finished': 'completed',
-    };
-
-    return {
-        id: dbJob.job_id?.toString() || '',
-        jobCode: dbJob.job_id?.toString() || 'N/A',
-        rollId: '',
-        orderId: '',
-        ticketId: '',
-        versionTag: '', // Not used when grouped
-        versionQty: dbJob.total_versions || 0,
-        pdfPath: '',
-        status: statusMap[dbJob.status] || 'pending',
-        dueDate: dbJob.updated_at || dbJob.created_at || new Date().toISOString(),
-        comments: '',
-        qtyExplanation: `${dbJob.completed_versions || 0} of ${dbJob.total_versions || 0} versions completed`,
-        positionInRoll: 0,
-        createdAt: dbJob.created_at || new Date().toISOString(),
-        startedAt: undefined,
-        completedAt: dbJob.updated_at || undefined,
-        material: '',
-        finishing: '',
-        operations: {}, // Not used when grouped
-        // Additional fields for grouped display
-        totalVersions: dbJob.total_versions || 0,
-        completedVersions: dbJob.completed_versions || 0,
-        versionTags: dbJob.version_tags || [],
-        currentStatus: dbJob.status || 'print_ready', // Use status from database view
-        maxCompletedSequence: dbJob.max_completed_sequence || 0,
-        runlistId: dbJob.runlist_id || null, // Runlist ID for grouping
-    };
-}
+// Status column configurations
+const statusConfigs: JobStatusCardConfig[] = [
+    {
+        status: 'print_ready',
+        filterRule: (job: Job) => job.currentStatus === 'print_ready' || !job.currentStatus,
+        groupBy: 'runlist',
+        sortBy: 'due_date',
+        title: 'Print Ready',
+        description: 'Jobs ready for printing',
+        icon: 'Package',
+    },
+    {
+        status: 'printed',
+        filterRule: (job: Job) => job.currentStatus === 'printed',
+        groupBy: 'runlist',
+        sortBy: 'due_date',
+        title: 'Printed',
+        description: 'Jobs that have been printed',
+        icon: 'Printer',
+    },
+    {
+        status: 'digital_cut',
+        filterRule: (job: Job) => job.currentStatus === 'digital_cut',
+        groupBy: 'runlist',
+        sortBy: 'due_date',
+        title: 'Digital Cut',
+        description: 'Jobs at digital cutting stage',
+        icon: 'Scissors',
+    },
+    {
+        status: 'slitter',
+        filterRule: (job: Job) => job.currentStatus === 'slitter',
+        groupBy: 'runlist',
+        sortBy: 'due_date',
+        title: 'Slitter',
+        description: 'Jobs at slitter stage',
+        icon: 'Scissors',
+    },
+    {
+        status: 'production_finished',
+        filterRule: (job: Job) => job.currentStatus === 'production_finished',
+        groupBy: 'runlist',
+        sortBy: 'due_date',
+        title: 'Production Finished',
+        description: 'Completed production jobs',
+        icon: 'CheckCircle2',
+    },
+];
 
 export default function JobStatusPage() {
     const [jobs, setJobs] = useState<Job[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
-    const [showFilters, setShowFilters] = useState(false);
-    const [limit, setLimit] = useState<number>(500); // Increased limit to show more jobs across all statuses
-    const [filters, setFilters] = useState<JobFilterOptions>({
-        // No default filters - querying from job_operations
-        limit: 500, // Request more jobs to ensure all statuses are represented
-    });
+    const [activeId, setActiveId] = useState<string | null>(null);
+    const [draggedJob, setDraggedJob] = useState<Job | null>(null);
+    const [draggedRunlist, setDraggedRunlist] = useState<{ runlistId: string; jobs: Job[] } | null>(null);
 
-    // Load jobs from API
+    const sensors = useSensors(
+        useSensor(PointerSensor, {
+            activationConstraint: {
+                distance: 8,
+            },
+        })
+    );
+
+    // Memoize status configs to prevent recreation
+    const memoizedStatusConfigs = useMemo(() => statusConfigs, []);
+
     useEffect(() => {
         loadJobs();
-    }, [filters, limit]);
+    }, []);
 
-    async function loadJobs() {
-        setLoading(true);
-        setError(null);
+    const loadJobs = async () => {
         try {
-            // Request all jobs (or a large limit) so we can see all statuses
-            const dbJobs = await fetchJobs({ ...filters, limit: limit || 500 });
-            console.log('Raw jobs from API (first 5):', dbJobs.slice(0, 5).map(j => ({ 
-                job_id: j.job_id, 
-                status: j.status, 
-                max_completed_sequence: j.max_completed_sequence 
-            }))); // Debug: log first 5 jobs
-            const mappedJobs = dbJobs.map(mapDbJobToJob);
-            // Debug: Log status distribution
-            const statusCounts = mappedJobs.reduce((acc, job) => {
-                const status = job.currentStatus || 'unknown';
-                acc[status] = (acc[status] || 0) + 1;
-                return acc;
-            }, {} as Record<string, number>);
-            console.log('Job status distribution:', statusCounts);
-            setJobs(mappedJobs);
+            setLoading(true);
+            setError(null);
+            const jobsData = await fetchJobs({ limit: 1000 });
+            
+            // Transform API data to match Job interface
+            const transformedJobs: Job[] = jobsData.map((job: any) => {
+                // Map status from API format to JobStatusCategory
+                let currentStatus: JobStatusCategory = 'print_ready';
+                if (job.status) {
+                    const statusMap: Record<string, JobStatusCategory> = {
+                        'print_ready': 'print_ready',
+                        'printed': 'printed',
+                        'digital_cut': 'digital_cut',
+                        'slitter': 'slitter',
+                        'production_finished': 'production_finished',
+                    };
+                    currentStatus = statusMap[job.status] || 'print_ready';
+                }
+                
+                // Format job_id as jobCode (use job_id directly, e.g., "4677_5995")
+                const jobId = job.job_id || job.id || '';
+                const jobCode = jobId;
+                
+                // Handle dates - API returns created_at and updated_at
+                // If dates are null/invalid, use current date as fallback
+                let createdAt: string;
+                let dueDate: string;
+                
+                if (job.created_at) {
+                    const createdDate = new Date(job.created_at);
+                    if (!isNaN(createdDate.getTime())) {
+                        createdAt = createdDate.toISOString();
+                        // Due date: add 7 days to created_at
+                        const due = new Date(createdDate);
+                        due.setDate(due.getDate() + 7);
+                        dueDate = due.toISOString();
+                    } else {
+                        // Invalid date, use current date
+                        const now = new Date();
+                        createdAt = now.toISOString();
+                        const due = new Date(now);
+                        due.setDate(due.getDate() + 7);
+                        dueDate = due.toISOString();
+                    }
+                } else if (job.updated_at) {
+                    // Fallback to updated_at if created_at is missing
+                    const updatedDate = new Date(job.updated_at);
+                    if (!isNaN(updatedDate.getTime())) {
+                        createdAt = updatedDate.toISOString();
+                        const due = new Date(updatedDate);
+                        due.setDate(due.getDate() + 7);
+                        dueDate = due.toISOString();
+                    } else {
+                        const now = new Date();
+                        createdAt = now.toISOString();
+                        const due = new Date(now);
+                        due.setDate(due.getDate() + 7);
+                        dueDate = due.toISOString();
+                    }
+                } else {
+                    // No dates available, use current date
+                    const now = new Date();
+                    createdAt = now.toISOString();
+                    const due = new Date(now);
+                    due.setDate(due.getDate() + 7);
+                    dueDate = due.toISOString();
+                }
+                
+                return {
+                    id: jobId,
+                    jobCode: jobCode,
+                    rollId: job.runlist_id || '',
+                    orderId: jobId,
+                    ticketId: jobId,
+                    versionTag: job.version_tags?.[0] || '',
+                    versionQty: job.total_versions || 0,
+                    pdfPath: '',
+                    status: 'pending' as const,
+                    dueDate: dueDate,
+                    comments: '',
+                    qtyExplanation: '',
+                    positionInRoll: 0,
+                    createdAt: createdAt,
+                    currentStatus: currentStatus,
+                    totalVersions: job.total_versions || 0,
+                    completedVersions: job.completed_versions || 0,
+                    versionTags: job.version_tags || [],
+                    runlistId: job.runlist_id || null,
+                };
+            });
+            
+            setJobs(transformedJobs);
         } catch (err) {
-            console.error('Error loading jobs:', err);
             setError(err instanceof Error ? err.message : 'Failed to load jobs');
+            console.error('Error loading jobs:', err);
         } finally {
             setLoading(false);
         }
+    };
+
+    const handleDragStart = (event: DragStartEvent) => {
+        const activeId = event.active.id as string;
+        const activeData = event.active.data.current;
+        setActiveId(activeId);
+        
+        // Check if it's a runlist or a job
+        if (activeId.startsWith('runlist-') && activeData?.type === 'runlist') {
+            // It's a runlist
+            setDraggedJob(null);
+            setDraggedRunlist({
+                runlistId: activeData.runlistId,
+                jobs: activeData.jobs || [],
+            });
+        } else {
+            // It's a job
+            setDraggedRunlist(null);
+            const job = jobs.find((j) => j.id === activeId) || activeData?.job;
+            if (job) {
+                setDraggedJob(job);
+            }
+        }
+    };
+
+    const handleDragEnd = async (event: DragEndEvent) => {
+        const { active, over } = event;
+        
+        // Always clear active state first to prevent blank screen
+        setActiveId(null);
+        setDraggedJob(null);
+        setDraggedRunlist(null);
+
+        if (!over) return;
+
+        try {
+            const activeId = active.id as string;
+            const targetStatus = over.id as string;
+
+            // Check if dropped on a status column
+            if (statusConfigs.some((config) => config.status === targetStatus)) {
+                const activeData = active.data.current;
+                
+                // Check if it's a runlist group
+                if (activeId.startsWith('runlist-') && activeData?.type === 'runlist') {
+                    const runlistId = activeData.runlistId;
+                    const runlistJobs = activeData.jobs || [];
+                    
+                    if (runlistJobs.length > 0) {
+                        // Don't await - run in background to prevent blocking
+                        updateRunlistStatus(runlistId, runlistJobs, targetStatus as JobStatusCategory).catch(err => {
+                            console.error('Error updating runlist status:', err);
+                        });
+                    } else {
+                        console.warn(`No jobs found in runlist ${runlistId}`);
+                    }
+                } 
+                // Otherwise it's an individual job
+                else {
+                    const job = jobs.find((j) => j.id === activeId);
+                    if (job && job.currentStatus !== targetStatus) {
+                        // Don't await - run in background to prevent blocking
+                        updateJobStatus(activeId, targetStatus as JobStatusCategory).catch(err => {
+                            console.error('Error updating job status:', err);
+                        });
+                    }
+                }
+            }
+        } catch (err) {
+            console.error('Error in handleDragEnd:', err);
+            // Don't set error state to avoid blank screen
+        }
+    };
+
+    const updateJobStatus = async (jobId: string, newStatus: JobStatusCategory) => {
+        try {
+            // Optimistically update UI (don't show full loading screen)
+            setJobs((prevJobs) =>
+                prevJobs.map((job) =>
+                    job.id === jobId ? { ...job, currentStatus: newStatus } : job
+                )
+            );
+            
+            // Call API to update status (creates scanned codes)
+            const response = await fetch(`/api/jobs/${jobId}/status`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ status: newStatus }),
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({ error: 'Failed to update job status' }));
+                throw new Error(errorData.error || 'Failed to update job status');
+            }
+
+            const result = await response.json();
+            console.log('Status update result:', result);
+
+            // Process scanned codes in background (don't wait)
+            fetch('/api/process-status-updates', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ source: 'scanner' }),
+            }).catch(err => console.warn('Background processing failed:', err));
+
+            // Reload jobs after a short delay (allows processing to complete, without loading screen)
+            setTimeout(() => {
+                loadJobsWithoutLoadingScreen().catch(err => console.error('Error reloading jobs:', err));
+            }, 500);
+        } catch (err) {
+            console.error('Error updating job status:', err);
+            // Don't set error state - just log it to avoid blank screen
+            // Reload jobs to revert optimistic update (without loading screen)
+            loadJobsWithoutLoadingScreen().catch(reloadErr => 
+                console.error('Error reloading jobs:', reloadErr)
+            );
+        }
+    };
+
+    const updateRunlistStatus = async (runlistId: string, runlistJobs: Job[], newStatus: JobStatusCategory) => {
+        try {
+            // Optimistically update UI for all jobs in runlist (don't set loading)
+            setJobs((prevJobs) =>
+                prevJobs.map((job) =>
+                    runlistJobs.some((rj) => rj.id === job.id) 
+                        ? { ...job, currentStatus: newStatus } 
+                        : job
+                )
+            );
+            
+            // Use the runlist endpoint (more efficient - updates all jobs at once)
+            const response = await fetch(`/api/runlists/${runlistId}/status`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ status: newStatus }),
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({ error: 'Failed to update runlist status' }));
+                throw new Error(errorData.error || 'Failed to update runlist status');
+            }
+
+            const result = await response.json();
+            console.log(`Updated runlist ${runlistId}:`, result);
+
+            // Process scanned codes in background (don't wait)
+            fetch('/api/process-status-updates', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ source: 'scanner' }),
+            }).catch(err => console.warn('Background processing failed:', err));
+
+            // Reload jobs after a short delay (without showing loading screen)
+            setTimeout(() => {
+                loadJobsWithoutLoadingScreen().catch(err => console.error('Error reloading jobs:', err));
+            }, 500);
+        } catch (err) {
+            console.error('Error updating runlist status:', err);
+            // Don't set error state - just log it to avoid blank screen
+            // Reload jobs to revert optimistic update (without loading screen)
+            loadJobsWithoutLoadingScreen().catch(reloadErr => 
+                console.error('Error reloading jobs:', reloadErr)
+            );
+        }
+    };
+
+    const loadJobsWithoutLoadingScreen = async () => {
+        try {
+            setError(null);
+            const jobsData = await fetchJobs({ limit: 1000 });
+            
+            // Transform API data to match Job interface (same as loadJobs but without setLoading)
+            const transformedJobs: Job[] = jobsData.map((job: any) => {
+                let currentStatus: JobStatusCategory = 'print_ready';
+                if (job.status) {
+                    const statusMap: Record<string, JobStatusCategory> = {
+                        'print_ready': 'print_ready',
+                        'printed': 'printed',
+                        'digital_cut': 'digital_cut',
+                        'slitter': 'slitter',
+                        'production_finished': 'production_finished',
+                    };
+                    currentStatus = statusMap[job.status] || 'print_ready';
+                }
+                
+                const jobId = job.job_id || job.id || '';
+                const jobCode = jobId;
+                
+                let createdAt: string;
+                let dueDate: string;
+                
+                if (job.created_at) {
+                    const createdDate = new Date(job.created_at);
+                    if (!isNaN(createdDate.getTime())) {
+                        createdAt = createdDate.toISOString();
+                        const due = new Date(createdDate);
+                        due.setDate(due.getDate() + 7);
+                        dueDate = due.toISOString();
+                    } else {
+                        const now = new Date();
+                        createdAt = now.toISOString();
+                        const due = new Date(now);
+                        due.setDate(due.getDate() + 7);
+                        dueDate = due.toISOString();
+                    }
+                } else if (job.updated_at) {
+                    const updatedDate = new Date(job.updated_at);
+                    if (!isNaN(updatedDate.getTime())) {
+                        createdAt = updatedDate.toISOString();
+                        const due = new Date(updatedDate);
+                        due.setDate(due.getDate() + 7);
+                        dueDate = due.toISOString();
+                    } else {
+                        const now = new Date();
+                        createdAt = now.toISOString();
+                        const due = new Date(now);
+                        due.setDate(due.getDate() + 7);
+                        dueDate = due.toISOString();
+                    }
+                } else {
+                    const now = new Date();
+                    createdAt = now.toISOString();
+                    const due = new Date(now);
+                    due.setDate(due.getDate() + 7);
+                    dueDate = due.toISOString();
+                }
+                
+                return {
+                    id: jobId,
+                    jobCode: jobCode,
+                    rollId: job.runlist_id || '',
+                    orderId: jobId,
+                    ticketId: jobId,
+                    versionTag: job.version_tags?.[0] || '',
+                    versionQty: job.total_versions || 0,
+                    pdfPath: '',
+                    status: 'pending' as const,
+                    dueDate: dueDate,
+                    comments: '',
+                    qtyExplanation: '',
+                    positionInRoll: 0,
+                    createdAt: createdAt,
+                    currentStatus: currentStatus,
+                    totalVersions: job.total_versions || 0,
+                    completedVersions: job.completed_versions || 0,
+                    versionTags: job.version_tags || [],
+                    runlistId: job.runlist_id || null,
+                };
+            });
+            
+            setJobs(transformedJobs);
+        } catch (err) {
+            console.error('Error reloading jobs:', err);
+            // Don't set error here to avoid blank screen
+        }
+    };
+
+    if (loading) {
+        return (
+            <div className="job-status-page">
+                <div className="loading-state">
+                    <Loader2 className="animate-spin" size={32} />
+                    <p>Loading jobs...</p>
+                </div>
+            </div>
+        );
     }
 
-    // Define status card configurations
-    const statusCardConfigs: JobStatusCardConfig[] = [
-        {
-            status: 'print_ready',
-            title: 'Print Ready',
-            description: 'All jobs without any status yet',
-            icon: 'Printer',
-            filterRule: (job: Job) => {
-                return job.currentStatus === 'print_ready';
-            },
-            groupBy: 'runlist',
-            sortBy: 'due_date',
-        },
-        {
-            status: 'printed',
-            title: 'Printed',
-            description: 'Print operation completed',
-            icon: 'Printer',
-            filterRule: (job: Job) => {
-                return job.currentStatus === 'printed';
-            },
-            groupBy: 'runlist',
-            sortBy: 'due_date',
-        },
-        {
-            status: 'digital_cut',
-            title: 'Digital Cut',
-            description: 'Coating operation completed',
-            icon: 'Scissors',
-            filterRule: (job: Job) => {
-                return job.currentStatus === 'digital_cut';
-            },
-            groupBy: 'runlist',
-            sortBy: 'due_date',
-        },
-        {
-            status: 'slitter',
-            title: 'Slitter',
-            description: 'Kiss cut and backscore done, slitter pending',
-            icon: 'Minus',
-            filterRule: (job: Job) => {
-                return job.currentStatus === 'slitter';
-            },
-            groupBy: 'runlist',
-            sortBy: 'due_date',
-        },
-        {
-            status: 'production_finished',
-            title: 'Production Finished',
-            description: 'All operations completed',
-            icon: 'CheckCircle2',
-            filterRule: (job: Job) => {
-                return job.currentStatus === 'production_finished';
-            },
-            groupBy: 'runlist',
-            sortBy: 'due_date',
-        },
-    ];
+    if (error) {
+        return (
+            <div className="job-status-page">
+                <div className="error-state">
+                    <p>Error: {error}</p>
+                    <button onClick={loadJobs}>Retry</button>
+                </div>
+            </div>
+        );
+    }
 
     return (
-        <div className="job-status-page">
-            <div className="job-status-header">
-                <div className="job-status-title">
-                    <Activity size={24} />
-                    <h2>Job Status Overview</h2>
+        <DndContext
+            sensors={sensors}
+            collisionDetection={closestCenter}
+            onDragStart={handleDragStart}
+            onDragEnd={handleDragEnd}
+        >
+            <div className="job-status-page">
+                <div className="job-status-header">
+                    <h1>Job Status</h1>
+                    <p>Drag jobs between columns to update their status</p>
                 </div>
-                <button 
-                    className="filter-toggle-btn"
-                    onClick={() => setShowFilters(!showFilters)}
-                >
-                    <Settings size={18} />
-                    Filters
-                </button>
-            </div>
 
-            {showFilters && (
-                <div className="filter-panel">
-                    <div className="filter-panel-header">
-                        <h3>Filter Jobs</h3>
-                        <button 
-                            className="close-filter-btn"
-                            onClick={() => setShowFilters(false)}
+                <div className="job-status-columns">
+                    {memoizedStatusConfigs.map((config) => (
+                        <div
+                            key={config.status}
+                            id={config.status}
+                            className="status-column"
                         >
-                            <X size={18} />
-                        </button>
-                    </div>
-                    <div className="filter-options">
-                        <div className="filter-group">
-                            <label>Status:</label>
-                            <select
-                                value={filters.status || ''}
-                                onChange={(e) => setFilters({ ...filters, status: e.target.value || undefined })}
-                            >
-                                <option value="">All Statuses</option>
-                                <option value="pending">Pending</option>
-                                <option value="started">Started</option>
-                                <option value="completed">Completed</option>
-                            </select>
+                            <JobStatusCard config={config} jobs={jobs} />
                         </div>
-
-                        <div className="filter-group">
-                            <label>Material:</label>
-                            <input
-                                type="text"
-                                placeholder="Filter by material"
-                                value={filters.material || ''}
-                                onChange={(e) => setFilters({ ...filters, material: e.target.value || undefined })}
-                            />
-                        </div>
-
-                        <div className="filter-group">
-                            <label>Finishing:</label>
-                            <input
-                                type="text"
-                                placeholder="Filter by finishing"
-                                value={filters.finishing || ''}
-                                onChange={(e) => setFilters({ ...filters, finishing: e.target.value || undefined })}
-                            />
-                        </div>
-
-                        <div className="filter-group">
-                            <label>Limit Results:</label>
-                            <select
-                                value={limit}
-                                onChange={(e) => setLimit(parseInt(e.target.value, 10))}
-                            >
-                                <option value={50}>50 jobs</option>
-                                <option value={100}>100 jobs</option>
-                                <option value={200}>200 jobs</option>
-                            </select>
-                        </div>
-
-                        <div className="filter-group">
-                            <label>Operations:</label>
-                            <div className="filter-checkboxes">
-                                <label className="filter-checkbox">
-                                    <input
-                                        type="checkbox"
-                                        checked={filters.hasPrint || false}
-                                        onChange={(e) => setFilters({ ...filters, hasPrint: e.target.checked ? true : undefined })}
-                                    />
-                                    <span>Has Print</span>
-                                </label>
-                                <label className="filter-checkbox">
-                                    <input
-                                        type="checkbox"
-                                        checked={filters.hasCoating || false}
-                                        onChange={(e) => setFilters({ ...filters, hasCoating: e.target.checked ? true : undefined })}
-                                    />
-                                    <span>Has Coating</span>
-                                </label>
-                                <label className="filter-checkbox">
-                                    <input
-                                        type="checkbox"
-                                        checked={filters.hasKissCut || false}
-                                        onChange={(e) => setFilters({ ...filters, hasKissCut: e.target.checked ? true : undefined })}
-                                    />
-                                    <span>Has Kiss Cut</span>
-                                </label>
-                                <label className="filter-checkbox">
-                                    <input
-                                        type="checkbox"
-                                        checked={filters.hasBackscore || false}
-                                        onChange={(e) => setFilters({ ...filters, hasBackscore: e.target.checked ? true : undefined })}
-                                    />
-                                    <span>Has Backscore</span>
-                                </label>
-                                <label className="filter-checkbox">
-                                    <input
-                                        type="checkbox"
-                                        checked={filters.hasSlitter || false}
-                                        onChange={(e) => setFilters({ ...filters, hasSlitter: e.target.checked ? true : undefined })}
-                                    />
-                                    <span>Has Slitter</span>
-                                </label>
-                            </div>
-                        </div>
-
-                        <div className="filter-actions">
-                            <button 
-                                className="clear-filters-btn"
-                                onClick={() => {
-                                    setFilters({}); // Reset filters
-                                    setLimit(100);
-                                }}
-                            >
-                                Reset Filters
-                            </button>
-                        </div>
-                    </div>
+                    ))}
                 </div>
-            )}
 
-            <div className="job-status-content">
-                {loading && (
-                    <div className="loading-state">
-                        <p>Loading jobs...</p>
-                    </div>
-                )}
-                {error && (
-                    <div className="error-state">
-                        <p>Error: {error}</p>
-                        <button onClick={loadJobs}>Retry</button>
-                    </div>
-                )}
-                {!loading && !error && (
-                    <div className="job-status-grid">
-                        {statusCardConfigs.map((config) => (
-                            <JobStatusCard
-                                key={config.status}
-                                config={config}
-                                jobs={jobs}
-                            />
-                        ))}
-                    </div>
-                )}
+                {/* Drag Overlay */}
+                <DragOverlay>
+                    {activeId && (
+                        draggedRunlist ? (
+                            <div className="drag-overlay-runlist">
+                                <div className="runlist-id">Runlist {draggedRunlist.runlistId}</div>
+                                <div className="runlist-count">
+                                    {draggedRunlist.jobs.length} {draggedRunlist.jobs.length === 1 ? 'job' : 'jobs'}
+                                </div>
+                            </div>
+                        ) : draggedJob ? (
+                            <div className="drag-overlay-job">
+                                <div className="job-id">{draggedJob.jobCode}</div>
+                                <div className="job-status">
+                                    {draggedJob.currentStatus || 'print_ready'}
+                                </div>
+                            </div>
+                        ) : activeId.startsWith('runlist-') ? (
+                            <div className="drag-overlay-runlist">
+                                <div className="runlist-id">Runlist {activeId.replace('runlist-', '')}</div>
+                                <div className="runlist-count">Dragging...</div>
+                            </div>
+                        ) : null
+                    )}
+                </DragOverlay>
             </div>
-        </div>
+        </DndContext>
     );
 }
-

@@ -1,0 +1,36 @@
+.draggable-job-item {
+    padding: var(--spacing-sm) var(--spacing-md);
+    border-bottom: 1px solid var(--border-color);
+    transition: background-color 0.2s ease;
+    cursor: grab;
+    user-select: none;
+}
+
+.draggable-job-item:active {
+    cursor: grabbing;
+}
+
+.draggable-job-item:hover {
+    background: var(--bg-tertiary);
+}
+
+.draggable-job-item.dragging {
+    opacity: 0.5;
+    cursor: grabbing;
+}
+
+.draggable-job-item:last-child {
+    border-bottom: none;
+}
+
+.draggable-job-item.job-item-greyed {
+    opacity: 0.5;
+    filter: grayscale(0.3);
+}
+
+.draggable-job-item.job-item-greyed .job-id,
+.draggable-job-item.job-item-greyed .job-order-date,
+.draggable-job-item.job-item-greyed .job-due-date {
+    color: var(--text-tertiary);
+}
+
