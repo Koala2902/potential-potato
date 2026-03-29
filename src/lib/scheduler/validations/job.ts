@@ -7,8 +7,11 @@ export const DIGICON_MAX_TO_SLITTER_M = 1700;
 export const jobSwitchSchema = z
   .object({
     pdfQty: z.coerce.number().int().positive(),
+    /** Substrate / product material (not the PDF file name). Stored as `substrate_printcolour` with `printColour`. */
     material: z.string().min(1),
     printColour: z.string().min(1),
+    /** PDF or submission file name when applicable. */
+    fileName: z.string().min(1).optional().nullable(),
     finishing: z.enum(["none", "matte_varnish", "gloss_varnish", "laminate_adhesive"]),
     productionPath: z.enum([
       "indigo_only",

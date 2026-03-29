@@ -14,20 +14,29 @@ const MATERIAL_PILL_MAX = 14;
 function calendarJobTooltip(j: CalendarJobItem): string {
   const est = formatProductionTimeShort(j.estimatedMinutesForMachine);
   return [
-    j.material,
+    j.fileName ? `File: ${j.fileName}` : null,
+    `Material: ${j.material}`,
     j.finishing,
     j.productionPath,
     `${j.pdfQty} copies`,
     j.source,
     `Date: ${j.dateBasis}`,
     est === "—" ? "Est. on this machine: n/a" : `Est. on this machine: ${est}`,
-  ].join(" · ");
+  ]
+    .filter((line): line is string => line != null && line !== "")
+    .join(" · ");
 }
 
 function materialPillShort(material: string): string {
   const s = material.replace(/_/g, " ");
   if (s.length <= MATERIAL_PILL_MAX) return s;
   return `${s.slice(0, MATERIAL_PILL_MAX)}…`;
+}
+
+/** Prefer PDF / submission file name in the pill; otherwise the composite material key. */
+function jobPillLabel(j: CalendarJobItem): string {
+  const raw = j.fileName?.trim() ? j.fileName.trim() : j.material;
+  return materialPillShort(raw);
 }
 
 export type CalendarMachineStripItem = {
@@ -44,11 +53,6 @@ function padMonthParam(y: number, m: number): string {
   return `${y}-${String(m).padStart(2, "0")}`;
 }
 
-/** Lines of job UI in a day cell: up to 5 pills, plus one line for "+N more" when needed. */
-function maxVisibleJobLines(jobCount: number): number {
-  if (jobCount <= 0) return 0;
-  return Math.min(jobCount, 5) + (jobCount > 5 ? 1 : 0);
-}
 
 export function monthNavParams(y: number, m: number): {
   current: string;
@@ -95,21 +99,6 @@ function CalendarMonthGrid({ year, month, jobsByDay }: MonthGridProps) {
     while (last.length < 7) last.push({ kind: "empty" });
   }
 
-  const rowWeights = rows.map((row) => {
-    let maxLines = 0;
-    for (const cell of row) {
-      if (cell.kind !== "day") continue;
-      const dateKey =
-        padMonthParam(year, month) + `-${String(cell.day).padStart(2, "0")}`;
-      const n = (jobsByDay[dateKey] ?? []).length;
-      maxLines = Math.max(maxLines, maxVisibleJobLines(n));
-    }
-    /* At least 1fr so rows with only empty / zero-job days still get a share of height. */
-    return Math.max(1, maxLines);
-  });
-
-  const gridTemplateRows = rowWeights.map((w) => `minmax(0, ${w}fr)`).join(" ");
-
   return (
     <div className="scheduler-cal__month">
       <div className="scheduler-cal__weekday-row">
@@ -119,12 +108,7 @@ function CalendarMonthGrid({ year, month, jobsByDay }: MonthGridProps) {
           </div>
         ))}
       </div>
-      <div
-        className="scheduler-cal__days-grid"
-        style={{
-          gridTemplateRows,
-        }}
-      >
+      <div className="scheduler-cal__days-grid">
         {rows.flatMap((row, ri) =>
           row.map((cell, ci) => {
             const key = `${ri}-${ci}`;
@@ -154,7 +138,7 @@ function CalendarMonthGrid({ year, month, jobsByDay }: MonthGridProps) {
                   {cell.day}
                 </span>
                 <ul className="scheduler-cal__jobs">
-                  {dayJobs.slice(0, 5).map((j) => (
+                  {dayJobs.map((j) => (
                     <li
                       key={j.id}
                       title={calendarJobTooltip(j)}
@@ -163,12 +147,9 @@ function CalendarMonthGrid({ year, month, jobsByDay }: MonthGridProps) {
                       <span className="scheduler-cal__jobtime">
                         {formatProductionTimeShort(j.estimatedMinutesForMachine)}
                       </span>
-                      <span className="scheduler-cal__jobmat">{materialPillShort(j.material)}</span>
+                      <span className="scheduler-cal__jobmat">{jobPillLabel(j)}</span>
                     </li>
                   ))}
-                  {dayJobs.length > 5 && (
-                    <li className="scheduler-cal__more">+{dayJobs.length - 5} more</li>
-                  )}
                 </ul>
               </div>
             );
@@ -296,7 +277,8 @@ export function CalendarGrid({
 
       <p className="scheduler-cal__footnote">
         Each job appears on its <strong>scheduled</strong> date if set, otherwise{" "}
-        <strong>due</strong>, otherwise <strong>created</strong> (in {tz}).
+        <strong>due</strong>, otherwise <strong>created</strong> (in {tz}). Labels use the PDF file
+        name when available; otherwise the material key (hover for full detail).
       </p>
     </div>
   );

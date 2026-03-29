@@ -200,6 +200,7 @@ export interface SchedulerJob {
     createdAt: string;
     pdfQty: number;
     material: string;
+    fileName: string | null;
     printColour: string;
     finishing: string;
     productionPath: string;
@@ -272,7 +273,17 @@ export interface SchedulerEstimateResult {
 export async function fetchSchedulerJobs(): Promise<SchedulerJob[]> {
     const response = await fetch(`${API_BASE_URL}/scheduler/jobs`);
     if (!response.ok) {
-        throw new Error('Failed to fetch scheduler jobs');
+        const j = (await response.json().catch(() => ({}))) as {
+            error?: unknown;
+            detail?: unknown;
+        };
+        const server =
+            (typeof j.detail === 'string' && j.detail) ||
+            (typeof j.error === 'string' && j.error) ||
+            response.statusText;
+        throw new Error(
+            `Failed to fetch scheduler jobs (${response.status})${server ? `: ${server}` : ''}`
+        );
     }
     return response.json();
 }

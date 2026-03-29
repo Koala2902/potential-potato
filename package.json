@@ -17,6 +17,7 @@
     "db:clean": "tsx scripts/clean-scheduler-db.ts",
     "db:clean:seed": "tsx scripts/clean-scheduler-db.ts --seed",
     "import:labex": "tsx scripts/import-labex-submissions.ts",
+    "db:backfill-job-material": "tsx scripts/migrate-job-material-filename.ts",
     "check-schema": "tsx server/db/check-schema.ts",
     "migrate-scheduler-db": "tsx scripts/migrate-scheduler-to-db.ts",
     "migrate-jobmanager-tables": "tsx scripts/migrate-jobmanager-tables-to-app.ts",

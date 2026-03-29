@@ -3,6 +3,7 @@ import type { JobDateBasis } from "../../lib/scheduler/job-calendar-date";
 export type CalendarJobItem = {
   id: string;
   material: string;
+  fileName: string | null;
   finishing: string;
   productionPath: string;
   pdfQty: number;

@@ -1,6 +1,5 @@
 .scheduler-page {
-  flex: 1;
-  min-height: 0;
+  flex: 0 1 auto;
   width: 100%;
   max-width: none;
   margin: 0;
@@ -46,8 +45,7 @@
 }
 
 .scheduler-section--calendar-fill {
-  flex: 1;
-  min-height: 0;
+  flex: 0 1 auto;
   display: flex;
   flex-direction: column;
   margin-bottom: 0;
@@ -380,10 +378,9 @@
   background: var(--bg-primary);
 }
 
-/* Calendar — fills main; week row heights use fr weights from max jobs that week (see CalendarGrid). */
+/* Calendar — grows with day content; page scrolls in .app-content. */
 .scheduler-cal--fill {
-  flex: 1;
-  min-height: 0;
+  flex: 0 1 auto;
   display: flex;
   flex-direction: column;
   gap: var(--spacing-md);
@@ -417,21 +414,17 @@
   color: var(--text-tertiary);
 }
 
-/** Fills remaining height under toolbar + machine row; no max-height / no overflow scroll. */
 .scheduler-cal__single-wrap {
-  flex: 1;
-  min-height: 0;
+  flex: 0 1 auto;
   width: 100%;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
 }
 
 .scheduler-cal__month {
   display: flex;
   flex-direction: column;
-  flex: 1;
-  min-height: 0;
+  flex: 0 1 auto;
   border-radius: var(--radius-lg);
   border: 1px solid var(--border-color);
   overflow: hidden;
@@ -455,11 +448,11 @@
 }
 
 .scheduler-cal__days-grid {
-  flex: 1;
-  min-height: 0;
+  flex: 0 1 auto;
   display: grid;
   grid-template-columns: repeat(7, 1fr);
-  /* grid-template-rows set inline: busier weeks get larger minmax(0, Nfr) tracks */
+  /* Tallest day in the week sets row height; min height keeps empty-only rows visible */
+  grid-auto-rows: minmax(3.25rem, auto);
   gap: 1px;
   background: var(--border-color);
 }
@@ -485,7 +478,7 @@
   flex-direction: column;
   gap: var(--spacing-xs);
   padding: var(--spacing-sm);
-  min-height: 0;
+  align-items: stretch;
 }
 
 .scheduler-cal__cell--today {
@@ -509,9 +502,8 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
-  flex: 1;
-  min-height: 0;
-  overflow: visible;
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 .scheduler-cal__jobpill {
@@ -550,11 +542,6 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text-secondary);
-}
-
-.scheduler-cal__more {
-  font-size: 0.65rem;
-  color: var(--text-tertiary);
 }
 
 .scheduler-cal__footnote {

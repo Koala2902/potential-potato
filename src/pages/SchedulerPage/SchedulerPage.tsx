@@ -54,6 +54,7 @@ function buildJobsByDayForJobs(
     const item: CalendarJobItem = {
       id: job.id,
       material: job.material,
+      fileName: job.fileName ?? null,
       finishing: job.finishing,
       productionPath: job.productionPath,
       pdfQty: job.pdfQty,

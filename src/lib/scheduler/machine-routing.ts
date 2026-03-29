@@ -3,6 +3,9 @@ import { z } from "zod";
 /** Stored on each `Operation` as a single `OperationParam` row. */
 export const LINE_SPEED_PARAM_KEY = "LINE_SPEED_M_PER_MIN";
 
+/** Optional per-operation setup time (minutes), summed for all operations in a routing step. */
+export const SETUP_TIME_PARAM_KEY = "SETUP_TIME_MIN";
+
 /** `TimeEstimatorSettings.key` for routing rules JSON. */
 export const SCHEDULER_ROUTING_KEY = "scheduler_routing_v1";
 
@@ -94,6 +97,32 @@ export function getLineSpeedMpm(op: OperationLike): number | null {
   return null;
 }
 
+export function getSetupTimeMinutes(op: OperationLike): number {
+  const p = op.params.find((x) => x.key === SETUP_TIME_PARAM_KEY);
+  if (!p) return 0;
+  const v = p.value;
+  if (typeof v === "number" && Number.isFinite(v) && v >= 0) return v;
+  if (typeof v === "string" && v.trim() !== "") {
+    const n = Number(v);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  return 0;
+}
+
+/** Sums setup minutes for enabled operations whose ids are in the step (mode or custom list). */
+export function sumSetupMinutesForOperationIds(
+  operations: OperationLike[],
+  operationIds: string[]
+): number {
+  const idSet = new Set(operationIds);
+  let sum = 0;
+  for (const op of operations) {
+    if (!idSet.has(op.id) || !op.enabled) continue;
+    sum += getSetupTimeMinutes(op);
+  }
+  return sum;
+}
+
 export function effectiveSpeedMpmForOperationIds(
   operations: OperationLike[],
   operationIds: string[]
@@ -159,13 +188,15 @@ export function estimateMinutesForMachineStep(
     };
   }
 
+  const setupMinutes = sumSetupMinutesForOperationIds(machine.operations, operationIds);
+
   const speed = effectiveSpeedMpmForOperationIds(machine.operations, operationIds);
   if (speed == null || speed <= 0) {
     return {
       machineDisplayName: machine.displayName,
       machineName: machine.name,
       effectiveSpeedMpm: null,
-      minutes: 0,
+      minutes: setupMinutes,
       skippedReason: "Missing LINE_SPEED_M_PER_MIN on operations",
     };
   }
@@ -176,17 +207,17 @@ export function estimateMinutesForMachineStep(
       machineDisplayName: machine.displayName,
       machineName: machine.name,
       effectiveSpeedMpm: speed,
-      minutes: 0,
+      minutes: setupMinutes,
       skippedReason: "No roll length",
     };
   }
 
-  const minutes = len / speed;
+  const runMinutes = len / speed;
   return {
     machineDisplayName: machine.displayName,
     machineName: machine.name,
     effectiveSpeedMpm: speed,
-    minutes,
+    minutes: setupMinutes + runMinutes,
   };
 }
 

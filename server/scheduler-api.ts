@@ -18,6 +18,7 @@ import {
   SCHEDULER_ROUTING_KEY,
   schedulerRoutingFlowSchema,
 } from "../src/lib/scheduler/machine-routing.ts";
+import { compositeMaterialPrintColour } from "../src/lib/scheduler/job-material-key.ts";
 import {
   SWITCH_FLOW_DEFAULTS,
   SWITCH_FLOW_DEFAULTS_KEY,
@@ -425,7 +426,11 @@ schedulerRouter.get("/jobs", async (_req, res) => {
     res.json(Array.from(byKey.values()));
   } catch (e) {
     console.error("scheduler GET /jobs:", e);
-    res.status(500).json({ error: "Failed to list scheduler jobs" });
+    const detail = e instanceof Error ? e.message : String(e);
+    res.status(500).json({
+      error: "Failed to list scheduler jobs",
+      detail,
+    });
   }
 });
 
@@ -442,7 +447,8 @@ schedulerRouter.post("/jobs", async (req, res) => {
       data: {
         source: "manual",
         pdfQty: d.pdfQty,
-        material: d.material,
+        material: compositeMaterialPrintColour(d.material, d.printColour),
+        fileName: d.fileName ?? undefined,
         printColour: d.printColour,
         finishing: d.finishing,
         productionPath: d.productionPath,

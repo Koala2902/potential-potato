@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
   LINE_SPEED_PARAM_KEY,
+  SETUP_TIME_PARAM_KEY,
   parseSchedulerModes,
   type SchedulerMode,
 } from "../../lib/scheduler/machine-routing";
@@ -30,9 +31,25 @@ function readLineSpeed(op: SchedulerOperation): number {
   return 0;
 }
 
-function withLineSpeedParam(op: SchedulerOperation, speed: number): OperationParamRowInput[] {
+function readSetupTime(op: SchedulerOperation): number {
+  const p = op.params?.find((x) => x.key === SETUP_TIME_PARAM_KEY);
+  if (!p) return 0;
+  const v = p.value;
+  if (typeof v === "number" && Number.isFinite(v) && v >= 0) return v;
+  if (typeof v === "string" && v.trim() !== "") {
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 0 ? n : 0;
+  }
+  return 0;
+}
+
+function buildOperationParams(
+  op: SchedulerOperation,
+  lineSpeed: number,
+  setupMinutes: number
+): OperationParamRowInput[] {
   const rest = (op.params ?? [])
-    .filter((p) => p.key !== LINE_SPEED_PARAM_KEY)
+    .filter((p) => p.key !== LINE_SPEED_PARAM_KEY && p.key !== SETUP_TIME_PARAM_KEY)
     .map((p) => ({
       key: p.key,
       value: p.value,
@@ -44,14 +61,23 @@ function withLineSpeedParam(op: SchedulerOperation, speed: number): OperationPar
     }));
   const line: OperationParamRowInput = {
     key: LINE_SPEED_PARAM_KEY,
-    value: speed,
+    value: lineSpeed,
     valueType: "number",
     label: "Line speed",
     unit: "m/min",
     isConfigurable: true,
     sortOrder: 0,
   };
-  return [line, ...rest.map((r, i) => ({ ...r, sortOrder: i + 1 }))];
+  const setup: OperationParamRowInput = {
+    key: SETUP_TIME_PARAM_KEY,
+    value: setupMinutes,
+    valueType: "number",
+    label: "Setup time",
+    unit: "min",
+    isConfigurable: true,
+    sortOrder: 1,
+  };
+  return [line, setup, ...rest.map((r, i) => ({ ...r, sortOrder: i + 2 }))];
 }
 
 function opToBatchRule(op: SchedulerOperation): BatchRuleBodyInput {
@@ -123,11 +149,16 @@ export default function MachineConfigSection() {
     [machines]
   );
 
-  async function saveOperationRow(machineId: string, op: SchedulerOperation, patch: Partial<SchedulerOperation> & { lineSpeed?: number }) {
+  async function saveOperationRow(
+    machineId: string,
+    op: SchedulerOperation,
+    patch: Partial<SchedulerOperation> & { lineSpeed?: number; setupMinutes?: number }
+  ) {
     setError(null);
     setLoading(true);
     try {
       const lineSpeed = patch.lineSpeed ?? readLineSpeed(op);
+      const setupMinutes = patch.setupMinutes ?? readSetupTime(op);
       await updateSchedulerOperation(machineId, op.id, {
         name: patch.name ?? op.name,
         type: patch.type ?? op.type,
@@ -135,7 +166,7 @@ export default function MachineConfigSection() {
         enabled: patch.enabled ?? op.enabled,
         calcFnKey: op.calcFnKey ?? null,
         notes: op.notes ?? null,
-        params: withLineSpeedParam(op, lineSpeed),
+        params: buildOperationParams(op, lineSpeed, setupMinutes),
         batchRule: opToBatchRule(op),
       });
       setSuccess("Operation saved.");
@@ -192,7 +223,7 @@ export default function MachineConfigSection() {
         enabled: true,
         calcFnKey: null,
         notes: null,
-        params: withLineSpeedParam(created, 10),
+        params: buildOperationParams(created, 10, 0),
         batchRule: opToBatchRule(created),
       });
       setSuccess("Operation added.");
@@ -363,7 +394,7 @@ export default function MachineConfigSection() {
   );
 }
 
-type SortKey = "name" | "speed" | "sortOrder";
+type SortKey = "name" | "speed" | "setup" | "sortOrder";
 
 function MachineCard({
   machine,
@@ -378,7 +409,7 @@ function MachineCard({
   onSaveRow: (
     machineId: string,
     op: SchedulerOperation,
-    patch: Partial<SchedulerOperation> & { lineSpeed?: number }
+    patch: Partial<SchedulerOperation> & { lineSpeed?: number; setupMinutes?: number }
   ) => Promise<void>;
   onAddOperation: () => void;
   onDeleteOperation: (op: SchedulerOperation) => void;
@@ -410,6 +441,8 @@ function MachineCard({
       if (sortBy.key === "name") return a.name.localeCompare(b.name) * dir;
       if (sortBy.key === "speed")
         return (readLineSpeed(a) - readLineSpeed(b)) * dir;
+      if (sortBy.key === "setup")
+        return (readSetupTime(a) - readSetupTime(b)) * dir;
       return (a.sortOrder - b.sortOrder) * dir;
     });
     return ops;
@@ -495,6 +528,15 @@ function MachineCard({
                     <button
                       type="button"
                       className="config-page__th-sort"
+                      onClick={() => toggleSort("setup")}
+                    >
+                      Setup (min) {sortBy.key === "setup" ? (sortBy.dir === "asc" ? "↑" : "↓") : ""}
+                    </button>
+                  </th>
+                  <th>
+                    <button
+                      type="button"
+                      className="config-page__th-sort"
                       onClick={() => toggleSort("sortOrder")}
                     >
                       Order {sortBy.key === "sortOrder" ? (sortBy.dir === "asc" ? "↑" : "↓") : ""}
@@ -507,7 +549,7 @@ function MachineCard({
               <tbody>
                 {opsSorted.map((op) => (
                   <tr
-                    key={`${op.id}-${op.name}-${readLineSpeed(op)}-${op.sortOrder}-${op.enabled}`}
+                    key={`${op.id}-${op.name}-${readLineSpeed(op)}-${readSetupTime(op)}-${op.sortOrder}-${op.enabled}`}
                     data-testid={`config-op-row-${op.id}`}
                   >
                     <td>
@@ -531,6 +573,21 @@ function MachineCard({
                           const n = Number(e.target.value);
                           if (Number.isFinite(n) && n !== readLineSpeed(op)) {
                             void onSaveRow(machine.id, op, { lineSpeed: n });
+                          }
+                        }}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        type="number"
+                        min={0}
+                        step={1}
+                        className="scheduler-input config-page__ops-table-input"
+                        defaultValue={readSetupTime(op)}
+                        onBlur={(e) => {
+                          const n = Number(e.target.value);
+                          if (Number.isFinite(n) && n >= 0 && n !== readSetupTime(op)) {
+                            void onSaveRow(machine.id, op, { setupMinutes: n });
                           }
                         }}
                       />
@@ -583,6 +640,7 @@ function MachineCard({
         </div>
         <p className="scheduler-muted config-page__modes-hint">
           A mode is a set of operations. Effective line speed is the minimum speed among selected operations.
+          Setup times (minutes) on those operations are summed for each routing step.
         </p>
         {draft.length === 0 ? (
           <p className="scheduler-muted">No modes yet.</p>

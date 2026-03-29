@@ -46,7 +46,8 @@ function toMachineLike(m: MachineWithOps): MachineLike {
 
 /**
  * Line-speed routing: match `productionPath` to a rule, then for each step use
- * min(LINE_SPEED_M_PER_MIN) over the mode/custom ops, minutes = rollLengthMetres / speed.
+ * min(LINE_SPEED_M_PER_MIN) over the mode/custom ops for run time (rollLengthMetres / speed),
+ * plus summed SETUP_TIME_MIN on those operations.
  */
 export function estimate(input: EstimateInput): EstimateResult {
   const rules = input.routingFlow?.rules ?? [];

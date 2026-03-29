@@ -16,6 +16,10 @@ import { join } from "node:path";
 import { parse } from "csv-parse/sync";
 import { Prisma } from "@prisma/client";
 
+import {
+  compositeMaterialPrintColour,
+  splitLabexProfile,
+} from "../src/lib/scheduler/job-material-key.ts";
 import { prisma } from "../server/db/prisma.ts";
 
 type Row = {
@@ -59,13 +63,6 @@ function parseNum(s: string): number | null {
   if (!t) return null;
   const n = Number.parseFloat(t.replace(/,/g, ""));
   return Number.isFinite(n) ? n : null;
-}
-
-function printColourFromProfile(profile: string): string {
-  const p = profile.trim();
-  if (!p) return "cmyk";
-  const slug = p.replace(/\s+/g, "_").replace(/[^a-zA-Z0-9_]/g, "").toLowerCase();
-  return slug.slice(0, 64) || "cmyk";
 }
 
 function parseDueDate(dateStr: string, timeStr: string): Date | null {
@@ -123,12 +120,16 @@ async function run() {
       mediaBoxH: mediaH,
     };
 
+    const { substrate, printColour: printToken } = splitLabexProfile(profile);
+    const materialKey = compositeMaterialPrintColour(substrate, printToken);
+
     return {
       source: "switch",
       externalId: `labex:${String(index + 1).padStart(5, "0")}`,
-      material: fileName.slice(0, 512) || `row_${index + 1}`,
+      material: materialKey.slice(0, 512),
+      fileName: fileName.slice(0, 512) || `row_${index + 1}`,
       pdfQty,
-      printColour: printColourFromProfile(profile),
+      printColour: printToken,
       finishing: "none",
       productionPath: mapProductionPath(pathCol),
       rollLengthMetres: rollLengthMetres ?? undefined,

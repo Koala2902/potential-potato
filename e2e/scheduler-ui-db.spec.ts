@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
 
+import { compositeMaterialPrintColour } from "../src/lib/scheduler/job-material-key.ts";
 import { prisma } from "../server/db/prisma.ts";
 
 test.describe.configure({ mode: "serial" });
@@ -17,10 +18,11 @@ const minimalJobBody = {
 
 test.describe("Schedule UI → database", () => {
   test("POST job: manual job persists to scheduler.Job", async ({ request }) => {
-    const material = `e2e_job_${Date.now()}`;
+    const substrate = `e2e_job_${Date.now()}`;
+    const material = compositeMaterialPrintColour(substrate, "cmyk");
 
     const res = await request.post("/api/scheduler/jobs", {
-      data: { ...minimalJobBody, material },
+      data: { ...minimalJobBody, material: substrate },
     });
     expect(res.ok()).toBeTruthy();
 
@@ -64,10 +66,11 @@ test.describe("Schedule UI → database", () => {
   });
 
   test("Calendar shows machine strip and lists job after POST", async ({ page, request }) => {
-    const material = `e2e_cal_${Date.now()}`;
+    const substrate = `e2e_cal_${Date.now()}`;
+    const material = compositeMaterialPrintColour(substrate, "cmyk");
 
     const res = await request.post("/api/scheduler/jobs", {
-      data: { ...minimalJobBody, material },
+      data: { ...minimalJobBody, material: substrate },
     });
     expect(res.ok()).toBeTruthy();
 

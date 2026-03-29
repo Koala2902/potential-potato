@@ -129,7 +129,10 @@ model Job {
   scheduledDate    DateTime?
   createdAt        DateTime  @default(now())
   pdfQty           Int
+  /// Composite key: `substrate_printcolour` (see job-material-key.ts). Not the PDF file name.
   material         String
+  /// Original PDF / submission file name when distinct from material key.
+  fileName         String?
   printColour      String
   finishing        String
   productionPath   String

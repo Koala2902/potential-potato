@@ -113,6 +113,7 @@ async function main() {
             path.join(migrationsDir, '025-migrate-public-machines-operations-to-scheduler.sql'),
             'app'
         );
+        await runMigration(path.join(migrationsDir, '026-scheduler-job-file-name.sql'), 'app');
 
         console.log('\n=== Migration Summary ===');
         console.log('✓ All migrations completed successfully!');
