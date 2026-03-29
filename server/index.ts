@@ -4,9 +4,19 @@ import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
 import { getProductionQueue, getImpositionDetails, getFileIds, findRunlistByScan, getProductionQueueByRunlist } from './db/queries.js';
-import { getMachines, getAvailableOperations, recordScannedCode, recordRunlistScans, getJobs } from './db/jobmanager-queries.js';
+import {
+    getMachines,
+    getAvailableOperations,
+    getMachineModes,
+    recordScannedCode,
+    recordRunlistScans,
+    getJobs,
+} from './db/jobmanager-queries.js';
 import { processPrintOSRecords, processScannedCodes } from './db/status-updates.js';
-import pool from './db/connection.js';
+import logsPool from './db/connection.js';
+import { appPool } from './db/app-connection.js';
+import { isUndefinedTableError } from './db/pg-errors.js';
+import { schedulerRouter } from './scheduler-api.js';
 
 dotenv.config();
 
@@ -15,11 +25,12 @@ const PORT = process.env.PORT || 3001;
 
 console.log('Starting server...');
 console.log(`Port: ${PORT}`);
-console.log(`Database: ${process.env.DB_NAME || 'logs'}`);
-console.log(`Host: ${process.env.DB_HOST || 'localhost'}`);
+console.log('Logs DB: configured via LOGS_DATABASE_URL or LOGS_DB_*');
+console.log('App DB: configured via DATABASE_URL or APP_DB_*');
 
 app.use(cors());
 app.use(express.json());
+app.use('/api/scheduler', schedulerRouter);
 
 // PDF archive folder path
 const PDF_ARCHIVE_PATH = '/Volumes/Daily Print Jobs/_NEXT HotFolder/RDevArchive';
@@ -36,12 +47,20 @@ app.get('/', (req, res) => {
             fileIds: '/api/imposition/:impositionId/file-ids',
             machines: '/api/machines',
             operations: '/api/operations?machineId=:machineId',
+            machineModes: '/api/machine-modes?machineId=:machineId',
             scan: '/api/scan (POST)',
             scannedCodes: '/api/scanned-codes (POST)',
-            jobs: '/api/jobs?status=print_ready&limit=100'
+            jobs: '/api/jobs?status=print_ready&limit=100',
+            schedulerJobs: '/api/scheduler/jobs',
+            schedulerEstimate: '/api/scheduler/estimate (POST)',
+            schedulerConfigMachines: '/api/scheduler/config/machines (GET, POST, PATCH)',
+            schedulerConfigOperations: '/api/scheduler/config/machines/:id/operations (POST, PATCH, DELETE)',
+            schedulerDiagnostics: '/api/scheduler/config/diagnostics',
+            schedulerRoutingSettings: '/api/scheduler/settings/routing (GET, PUT)',
+            schedulerTimeEstimatorSettings: '/api/scheduler/settings/time-estimator (GET)'
         },
         port: PORT,
-        database: process.env.DB_NAME || 'logs'
+        database: 'see LOGS_DATABASE_URL + DATABASE_URL'
     });
 });
 
@@ -80,6 +99,26 @@ app.get('/api/imposition/:impositionId/file-ids', async (req, res) => {
     }
 });
 
+// Check if PDF exists (HEAD request)
+app.head('/api/pdf/:impositionId', async (req, res) => {
+    try {
+        const { impositionId } = req.params;
+        const pdfPath = path.join(PDF_ARCHIVE_PATH, `${impositionId}.pdf`);
+        
+        if (fs.existsSync(pdfPath)) {
+            const stats = fs.statSync(pdfPath);
+            res.setHeader('Content-Type', 'application/pdf');
+            res.setHeader('Content-Length', stats.size.toString());
+            res.status(200).end();
+        } else {
+            res.status(404).end();
+        }
+    } catch (error) {
+        console.error('Error checking PDF:', error);
+        res.status(500).end();
+    }
+});
+
 // Serve PDF from archive folder
 app.get('/api/pdf/:impositionId', async (req, res) => {
     try {
@@ -110,7 +149,7 @@ app.get('/api/pdf/:impositionId', async (req, res) => {
     }
 });
 
-// Get machines from jobmanager database
+// Get machines from app database
 app.get('/api/machines', async (req, res) => {
     try {
         const machines = await getMachines();
@@ -132,6 +171,18 @@ app.get('/api/operations', async (req, res) => {
     } catch (error) {
         console.error('Error fetching operations:', error);
         res.status(500).json({ error: 'Failed to fetch operations' });
+    }
+});
+
+// Preset operation bundles per machine (optional; empty → Ticket uses per-operation checkboxes only)
+app.get('/api/machine-modes', async (req, res) => {
+    try {
+        const { machineId } = req.query;
+        const modes = await getMachineModes(machineId as string | undefined);
+        res.json(modes);
+    } catch (error) {
+        console.error('Error fetching machine modes:', error);
+        res.status(500).json({ error: 'Failed to fetch machine modes' });
     }
 });
 
@@ -165,26 +216,22 @@ app.post('/api/scanned-codes', async (req, res) => {
 });
 
 // Get production status by machine (last 5 completed + 1 processing per machine)
+// Logs DB: job_operation_duration; app DB: imposition_file_mapping for version counts (merged in JS).
 app.get('/api/production-status', async (req, res) => {
     try {
-        const client = await pool.connect();
+        const logsClient = await logsPool.connect();
         try {
-            // Get completed operations (last 5 per machine) and processing operations (1 per machine)
-            // Count version_tags from file_ids in imposition_file_mapping
-            const result = await client.query(`
+            let result;
+            try {
+                result = await logsClient.query(`
                 WITH job_version_counts AS (
                     SELECT 
                         jod.job_id,
                         jod.machine_id,
                         COUNT(DISTINCT jod.version_tag) as processed_versions,
-                        -- operation_completed_at is stored as TIMESTAMP (no timezone) representing Australian local time
-                        -- We need to convert it properly: treat the stored value as Australian time, then convert to UTC
-                        -- The stored value like '2026-01-15 15:13:13' should be interpreted as Australian time
-                        -- AT TIME ZONE converts: Australian time -> UTC (subtracts 11 hours for AEDT)
                         MAX(
                             CASE 
                                 WHEN jod.operation_completed_at IS NOT NULL 
-                                -- First convert timestamp to text, then to timestamptz treating it as Australia/Sydney
                                 THEN timezone('UTC', jod.operation_completed_at AT TIME ZONE 'Australia/Sydney')
                                 ELSE NULL
                             END
@@ -206,13 +253,7 @@ app.get('/api/production-status', async (req, res) => {
                 total_version_counts AS (
                     SELECT 
                         jvc.*,
-                        (
-                            SELECT COUNT(DISTINCT 
-                                SPLIT_PART(SPLIT_PART(ifm.file_id, '_', 2), '_', 1)
-                            )
-                            FROM imposition_file_mapping ifm
-                            WHERE ifm.file_id LIKE 'FILE\\_%\\_Labex\\_' || jvc.job_id || '\\_%' ESCAPE '\\'
-                        ) as total_versions
+                        jvc.processed_versions::bigint as total_versions
                     FROM job_version_counts jvc
                 ),
                 completed_jobs AS (
@@ -269,6 +310,56 @@ app.get('/api/production-status', async (req, res) => {
                 
                 ORDER BY machine_id, status_type DESC, last_completed_at DESC;
             `);
+            } catch (e) {
+                if (isUndefinedTableError(e)) {
+                    console.warn(
+                        '[production-status] job_operation_duration missing on logs DB — run migrations (015 on logs). Returning [].'
+                    );
+                    return res.json([]);
+                }
+                throw e;
+            }
+
+            const rows = result.rows as any[];
+            const jobIds = [...new Set(rows.map((r) => r.job_id))];
+            if (jobIds.length > 0) {
+                const appClient = await appPool.connect();
+                try {
+                    try {
+                        const tvResult = await appClient.query(
+                            `SELECT j.job_id, (
+                            SELECT COUNT(DISTINCT 
+                                SPLIT_PART(SPLIT_PART(ifm.file_id, '_', 2), '_', 1)
+                            )
+                            FROM imposition_file_mapping ifm
+                            WHERE ifm.file_id LIKE 'FILE\\_%\\_Labex\\_' || j.job_id || '\\_%' ESCAPE '\\'
+                        )::bigint AS total_versions
+                        FROM unnest($1::text[]) AS j(job_id)`,
+                            [jobIds]
+                        );
+                        const byJob = new Map<string, number>();
+                        for (const r of tvResult.rows) {
+                            byJob.set(r.job_id, parseInt(r.total_versions, 10) || 0);
+                        }
+                        for (const row of rows) {
+                            const n = byJob.get(row.job_id);
+                            if (n !== undefined && n > 0) {
+                                row.total_versions = n;
+                            }
+                        }
+                    } catch (e) {
+                        if (isUndefinedTableError(e)) {
+                            console.warn(
+                                '[production-status] imposition_file_mapping missing on app DB — run migrations. Using processed_versions as total_versions.'
+                            );
+                        } else {
+                            throw e;
+                        }
+                    }
+                } finally {
+                    appClient.release();
+                }
+            }
             
             // Group by machine_id
             const grouped: Record<string, {
@@ -277,7 +368,7 @@ app.get('/api/production-status', async (req, res) => {
                 processing: any[];
             }> = {};
             
-            result.rows.forEach((row: any) => {
+            rows.forEach((row: any) => {
                 if (!grouped[row.machine_id]) {
                     grouped[row.machine_id] = {
                         machine_id: row.machine_id,
@@ -316,7 +407,7 @@ app.get('/api/production-status', async (req, res) => {
             
             res.json(Object.values(grouped));
         } finally {
-            client.release();
+            logsClient.release();
         }
     } catch (error: any) {
         console.error('Error fetching production status:', error);
@@ -339,7 +430,7 @@ app.put('/api/runlists/:runlistId/status', async (req, res) => {
             return res.status(400).json({ error: `Invalid status. Must be one of: ${validStatuses.join(', ')}` });
         }
 
-        const client = await pool.connect();
+        const client = await appPool.connect();
         try {
             // Get all job_ids in this runlist
             const runlistJobsResult = await client.query(`
@@ -414,11 +505,12 @@ app.put('/api/runlists/:runlistId/status', async (req, res) => {
                 }
             }
 
-            // Process scanned codes in background
             const { processScannedCodes } = await import('./db/status-updates.js');
-            processScannedCodes().catch(err => 
-                console.warn('Error processing scanned codes after runlist update:', err)
-            );
+            try {
+                await processScannedCodes();
+            } catch (err: any) {
+                console.warn('Error processing scanned codes after runlist update:', err?.message || err);
+            }
 
             res.json({ 
                 success: true, 
@@ -471,7 +563,7 @@ app.put('/api/jobs/:jobId/status', async (req, res) => {
             return res.json({ success: true, jobId, status, note: 'No operations needed for print_ready' });
         }
 
-        const client = await pool.connect();
+        const client = await appPool.connect();
         try {
             // Get all version_tags for this job from job_operations table (most reliable source)
             // Also try to get from file_ids as fallback
@@ -585,11 +677,12 @@ app.put('/api/jobs/:jobId/status', async (req, res) => {
     }
 });
 
-// Get jobs from jobmanager database with optional filters
+// Get jobs from app database (job status views / job_operations) with optional filters
 app.get('/api/jobs', async (req, res) => {
     try {
         const {
             status,
+            excludeStatus,
             material,
             finishing,
             hasPrint,
@@ -605,6 +698,7 @@ app.get('/api/jobs', async (req, res) => {
         const filters: any = {};
         
         if (status) filters.status = status as string;
+        if (excludeStatus) filters.excludeStatus = excludeStatus as string;
         if (material) filters.material = material as string;
         if (finishing) filters.finishing = finishing as string;
         if (hasPrint === 'true') filters.hasPrint = true;
@@ -630,7 +724,7 @@ app.get('/api/jobs', async (req, res) => {
 });
 
 // Find runlist by scan (format: job_id_version_tag, e.g., "4604_5889_1")
-// Also records the scan to scanned_codes if machineId and operations are provided
+// Also records the scan to scanned_codes when machineId is set (operations optional; omit for machine-only audit)
 app.post('/api/scan', async (req, res) => {
     try {
         const { scan, machineId, operations, userId } = req.body;
@@ -647,7 +741,7 @@ app.post('/api/scan', async (req, res) => {
         let individualFileIds: any[] = [];
         if (runlistId) {
             try {
-                const client = await pool.connect();
+                const client = await appPool.connect();
                 try {
                     const fileIdsResult = await client.query(`
                         SELECT DISTINCT ifm.file_id
@@ -699,10 +793,17 @@ app.post('/api/scan', async (req, res) => {
         // Determine if this is a runlist scan or a file_id scan
         const isRunlistDirectScan = runlistId && scan === runlistId;
         
-        // Record scan to scanned_codes if machineId and operations are provided
+        // Record scan to scanned_codes when machineId is set (operations optional)
         let recordedScans: any[] = [];
-        if (machineId && operations && Array.isArray(operations) && operations.length > 0) {
-            console.log(`[POST /api/scan] machineId and operations provided, will record scans`);
+        if (machineId && typeof machineId === 'string' && machineId.trim()) {
+            const hasOpList =
+                operations && Array.isArray(operations) && operations.length > 0;
+            const opsPayload: Record<string, unknown> | null = hasOpList
+                ? { operations }
+                : null;
+            console.log(
+                `[POST /api/scan] machineId provided, will record scans (operations: ${hasOpList ? 'yes' : 'machine only'})`
+            );
             try {
                 if (isRunlistDirectScan) {
                     // If user scanned the actual runlist barcode, record scans for all files
@@ -711,7 +812,7 @@ app.post('/api/scan', async (req, res) => {
                         runlistId,
                         machineId,
                         userId || null,
-                        { operations },
+                        opsPayload,
                         { timestamp: new Date().toISOString() }
                     );
                     recordedScans = scans.map(s => ({
@@ -727,7 +828,7 @@ app.post('/api/scan', async (req, res) => {
                         scan,
                         machineId,
                         userId || null,
-                        { operations },
+                        opsPayload,
                         { timestamp: new Date().toISOString() }
                     );
                     recordedScans = [{
@@ -736,21 +837,23 @@ app.post('/api/scan', async (req, res) => {
                         scanned_at: scannedCode.scanned_at
                     }];
                 }
-                
-                // Process the scan immediately (async, don't wait)
-                processScannedCodes().catch(err => {
-                    console.error('Error processing scanned codes after new scan:', err);
-                });
+
+                // Process the scan immediately when operations were sent (job pipeline); otherwise audit-only
+                if (hasOpList) {
+                    processScannedCodes().catch(err => {
+                        console.error('Error processing scanned codes after new scan:', err);
+                    });
+                }
             } catch (recordError) {
                 console.error('Error recording scan (continuing anyway):', recordError);
                 // Continue even if recording fails
             }
         } else {
-            console.log(`[POST /api/scan] Skipping scan recording - machineId: ${machineId}, operations: ${JSON.stringify(operations)}`);
+            console.log(`[POST /api/scan] Skipping scan recording — no machineId (operations: ${JSON.stringify(operations)})`);
         }
         if (!runlistId) {
             // Check if multiple runlists matched (partial match returned null)
-            const client = await pool.connect();
+            const client = await appPool.connect();
             try {
                 const multipleMatch = await client.query(
                     `SELECT DISTINCT runlist_id 
@@ -794,7 +897,7 @@ app.post('/api/scan', async (req, res) => {
         // Find which specific imposition contains the scanned file (for auto-selection)
         let scannedImpositionId: string | null = null;
         if (!isRunlistDirectScan && queue.length > 0) {
-            const client = await pool.connect();
+            const client = await appPool.connect();
             try {
                 // Parse scan to find the file_id pattern
                 const parts = scan.split('_');
@@ -803,6 +906,8 @@ app.post('/api/scan', async (req, res) => {
                     const jobIdParts = parts.slice(0, -1);
                     const jobId = jobIdParts.join('_');
                     const filePattern = `FILE_${version}_Labex_${jobId}_%`;
+                    
+                    console.log(`[POST /api/scan] Looking for imposition_id with pattern: ${filePattern}`);
                     
                     const impositionResult = await client.query(`
                         SELECT DISTINCT imposition_id
@@ -814,8 +919,33 @@ app.post('/api/scan', async (req, res) => {
                     if (impositionResult.rows.length > 0) {
                         scannedImpositionId = impositionResult.rows[0].imposition_id;
                         console.log(`[POST /api/scan] Scanned file belongs to imposition: ${scannedImpositionId}`);
+                        
+                        // Also check if PDF exists for debugging
+                        const pdfPath = path.join(PDF_ARCHIVE_PATH, `${scannedImpositionId}.pdf`);
+                        const pdfExists = fs.existsSync(pdfPath);
+                        console.log(`[POST /api/scan] PDF exists for imposition ${scannedImpositionId}: ${pdfExists} (path: ${pdfPath})`);
+                    } else {
+                        console.log(`[POST /api/scan] No imposition found for pattern: ${filePattern}`);
+                        
+                        // Try alternative pattern matching - check what file_ids actually exist
+                        const debugResult = await client.query(`
+                            SELECT DISTINCT file_id, imposition_id
+                            FROM imposition_file_mapping
+                            WHERE file_id LIKE $1 OR file_id LIKE $2
+                            LIMIT 5
+                        `, [`FILE_${version}_Labex_%${jobId}%`, `FILE_%_Labex_${jobId}_%`]);
+                        
+                        if (debugResult.rows.length > 0) {
+                            console.log(`[POST /api/scan] Found similar file_ids:`, debugResult.rows.map(r => ({ file_id: r.file_id, imposition_id: r.imposition_id })));
+                        } else {
+                            console.log(`[POST /api/scan] No similar file_ids found for jobId: ${jobId}, version: ${version}`);
+                        }
                     }
+                } else {
+                    console.log(`[POST /api/scan] Scan format invalid (need at least 3 parts): ${scan}`);
                 }
+            } catch (err) {
+                console.error(`[POST /api/scan] Error finding imposition_id:`, err);
             } finally {
                 client.release();
             }
@@ -836,7 +966,7 @@ app.post('/api/scan', async (req, res) => {
 // Get machine assignments
 app.get('/api/machine-assignments', async (req, res) => {
     try {
-        const client = await pool.connect();
+        const client = await appPool.connect();
         try {
             // Check if table exists, if not return empty array
             const tableCheck = await client.query(`
@@ -880,7 +1010,7 @@ app.post('/api/assign-to-machine', async (req, res) => {
             return res.status(400).json({ error: 'type must be "imposition" or "runlist"' });
         }
 
-        const client = await pool.connect();
+        const client = await appPool.connect();
         try {
             // Ensure table exists
             await client.query(`
@@ -1024,8 +1154,19 @@ function startScheduledProcessing() {
     console.log('✅ Scheduled processing started (runs immediately, then every 15 minutes)');
 }
 
-app.listen(PORT, () => {
+const httpServer = app.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);
     startScheduledProcessing();
+});
+
+httpServer.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EADDRINUSE') {
+        console.error(
+            `[server] Port ${PORT} is already in use. Stop the other process (e.g. another npm run dev) or run with PORT=3002`
+        );
+        process.exit(1);
+    }
+    console.error('[server] HTTP server error:', err);
+    process.exit(1);
 });
 

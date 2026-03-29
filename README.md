@@ -110,8 +110,8 @@ production-suite/
 Environment variables will be configured via `.env`:
 
 ```env
-# Database
-DATABASE_URL=postgresql://user:password@host:5432/production_suite
+# Database (same as .env.example: DB_* or DATABASE_URL — default DB name productioncapacity)
+DATABASE_URL=postgresql://user:password@host:5432/productioncapacity
 
 # PDF Storage
 PDF_FOLDER_PATH=/path/to/pdfs

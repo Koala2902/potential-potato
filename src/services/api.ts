@@ -1,3 +1,11 @@
+import type { JobSwitchInput } from '../lib/scheduler/validations/job';
+import type {
+    CreateMachineInput,
+    CreateOperationBodyInput,
+    PatchMachineInput,
+    UpdateOperationBodyInput,
+} from '../lib/scheduler/validations/config';
+import type { SchedulerRoutingFlow } from '../lib/scheduler/machine-routing';
 import { ProductionQueueItem, ImpositionDetails } from '../types';
 
 const API_BASE_URL = '/api';
@@ -84,12 +92,34 @@ export interface Operation {
     created_at?: string;
 }
 
-export async function fetchOperations(_machineId?: string | null): Promise<Operation[]> {
-    // machineId parameter is ignored - all operations are returned
-    const url = `${API_BASE_URL}/operations`;
+export async function fetchOperations(machineId?: string | null): Promise<Operation[]> {
+    const params = new URLSearchParams();
+    if (machineId?.trim()) {
+        params.set('machineId', machineId.trim());
+    }
+    const q = params.toString();
+    const url = q ? `${API_BASE_URL}/operations?${q}` : `${API_BASE_URL}/operations`;
     const response = await fetch(url);
     if (!response.ok) {
         throw new Error('Failed to fetch operations');
+    }
+    return response.json();
+}
+
+export interface MachineMode {
+    mode_id: number;
+    machine_id: string;
+    label: string;
+    operation_ids: string[];
+    sort_order: number;
+}
+
+/** Preset operation bundles from `machine_modes` (empty → use per-operation checkboxes). */
+export async function fetchMachineModes(machineId: string): Promise<MachineMode[]> {
+    const params = new URLSearchParams({ machineId: machineId.trim() });
+    const response = await fetch(`${API_BASE_URL}/machine-modes?${params}`);
+    if (!response.ok) {
+        throw new Error('Failed to fetch machine modes');
     }
     return response.json();
 }
@@ -121,6 +151,7 @@ export async function processScan(
 
 export interface JobFilterOptions {
     status?: string;
+    excludeStatus?: string;
     material?: string;
     finishing?: string;
     hasPrint?: boolean;
@@ -128,7 +159,9 @@ export interface JobFilterOptions {
     hasKissCut?: boolean;
     hasBackscore?: boolean;
     hasSlitter?: boolean;
+    /** ISO timestamp — filters jobs whose latest scan (`latest_completed_at`) is on or after this */
     dateFrom?: string;
+    /** ISO timestamp — filters jobs whose latest scan (`latest_completed_at`) is on or before this */
     dateTo?: string;
     limit?: number;
 }
@@ -137,6 +170,7 @@ export async function fetchJobs(filters?: JobFilterOptions): Promise<any[]> {
     const params = new URLSearchParams();
     
     if (filters?.status) params.append('status', filters.status);
+    if (filters?.excludeStatus) params.append('excludeStatus', filters.excludeStatus);
     if (filters?.material) params.append('material', filters.material);
     if (filters?.finishing) params.append('finishing', filters.finishing);
     if (filters?.hasPrint) params.append('hasPrint', 'true');
@@ -152,6 +186,302 @@ export async function fetchJobs(filters?: JobFilterOptions): Promise<any[]> {
     const response = await fetch(url);
     if (!response.ok) {
         throw new Error('Failed to fetch jobs');
+    }
+    return response.json();
+}
+
+/** Scheduler (Prisma) jobs — distinct from `/api/jobs` scan/status jobs. */
+export interface SchedulerJob {
+    id: string;
+    source: string;
+    connectorId: string | null;
+    externalId: string | null;
+    scheduledDate: string | null;
+    createdAt: string;
+    pdfQty: number;
+    material: string;
+    printColour: string;
+    finishing: string;
+    productionPath: string;
+    rollQty: number | null;
+    rollDirection: string | null;
+    coreSizes: string[];
+    dueDate: string | null;
+    labelWidthMm: number | null;
+    labelHeightMm: number | null;
+    labelGapMm: number | null;
+    labelsAcross: number | null;
+    labelOuterWidthMm: number | null;
+    labelSizeId: string | null;
+    overlaminateFilm: string | null;
+    rollLengthMetres: number | null;
+    forClient: boolean | null;
+    isSlitted: boolean | null;
+    timingSource: string | null;
+    timingMinutes: number | null;
+    timingBreakdown: unknown;
+    copies: number | null;
+    dieNumberDigital: number | null;
+    plateHeightMm: number | null;
+    switchDieInput: Record<string, unknown> | null;
+    switchEstimateOutput: Record<string, unknown> | null;
+    timeEstimationStatus: string | null;
+    timeEstimationError: string | null;
+    timeEstimationAt: string | null;
+}
+
+export interface TimeEstimatorSettingsRow {
+    id: string;
+    key: string;
+    label: string | null;
+    flowProperties: Record<string, unknown>;
+    createdAt: string;
+    updatedAt: string;
+}
+
+export interface SchedulerEstimateJobStep {
+    machineName: string;
+    machineDisplayName: string;
+    effectiveSpeedMpm: number | null;
+    minutes: number;
+    skippedReason?: string;
+}
+
+export interface SchedulerEstimateJobBreakdown {
+    jobId: string;
+    productionPath: string;
+    rollLengthMetres: number | null;
+    routingRuleId: string | null;
+    minutes: number;
+    steps: SchedulerEstimateJobStep[];
+}
+
+export interface SchedulerEstimateResult {
+    totalMinutes: number;
+    totalDisplay: string;
+    machinesUsed: string[];
+    slitterThresholdTriggered: boolean;
+    breakdown: unknown[];
+    jobBreakdowns: SchedulerEstimateJobBreakdown[];
+    batchContext: {
+        totalJobsInBatch: number;
+        sharedSetups: unknown[];
+    };
+}
+
+export async function fetchSchedulerJobs(): Promise<SchedulerJob[]> {
+    const response = await fetch(`${API_BASE_URL}/scheduler/jobs`);
+    if (!response.ok) {
+        throw new Error('Failed to fetch scheduler jobs');
+    }
+    return response.json();
+}
+
+export async function createSchedulerJob(body: JobSwitchInput): Promise<SchedulerJob> {
+    const response = await fetch(`${API_BASE_URL}/scheduler/jobs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+        const j = await response.json().catch(() => ({}));
+        throw new Error(typeof j.error === 'string' ? j.error : JSON.stringify(j.error ?? response.statusText));
+    }
+    return response.json();
+}
+
+export async function fetchTimeEstimatorSettings(): Promise<TimeEstimatorSettingsRow> {
+    const response = await fetch(`${API_BASE_URL}/scheduler/settings/time-estimator`);
+    if (!response.ok) {
+        throw new Error('Failed to fetch time estimator settings');
+    }
+    return response.json();
+}
+
+export async function estimateSchedulerJobs(jobIds: string[]): Promise<SchedulerEstimateResult> {
+    const response = await fetch(`${API_BASE_URL}/scheduler/estimate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jobIds }),
+    });
+    if (!response.ok) {
+        const j = await response.json().catch(() => ({}));
+        throw new Error(typeof j.error === 'string' ? j.error : JSON.stringify(j.error ?? response.statusText));
+    }
+    return response.json();
+}
+
+export interface SchedulerBatchRule {
+    id: string;
+    operationId: string;
+    scope: string;
+    groupByFields: string[];
+    appliesOnce: boolean;
+    thresholdValue: number | null;
+    routeToMachine: string | null;
+    conditionExpr: string | null;
+}
+
+export interface SchedulerOperationParam {
+    id: string;
+    operationId: string;
+    key: string;
+    value: unknown;
+    valueType: string;
+    label: string;
+    unit: string | null;
+    isConfigurable: boolean;
+    sortOrder: number;
+}
+
+export interface SchedulerOperation {
+    id: string;
+    machineId: string;
+    name: string;
+    type: string;
+    sortOrder: number;
+    enabled: boolean;
+    calcFnKey: string | null;
+    notes: string | null;
+    params: SchedulerOperationParam[];
+    batchRule: SchedulerBatchRule | null;
+}
+
+export interface SchedulerMachine {
+    id: string;
+    name: string;
+    displayName: string;
+    enabled: boolean;
+    sortOrder: number;
+    constants: Record<string, unknown>;
+    operations: SchedulerOperation[];
+}
+
+export interface SchedulerDiagnostics {
+    database: string;
+    schedulerMachineCount: number;
+    /** Rows in `scheduler."Operation"` (not `public`). */
+    schedulerOperationCount: number;
+    publicMachineCount: number | null;
+}
+
+export async function fetchSchedulerDiagnostics(): Promise<SchedulerDiagnostics> {
+    const response = await fetch(`${API_BASE_URL}/scheduler/config/diagnostics`);
+    if (!response.ok) {
+        throw new Error('Failed to fetch scheduler diagnostics');
+    }
+    return response.json();
+}
+
+export async function fetchSchedulerMachines(): Promise<SchedulerMachine[]> {
+    const response = await fetch(`${API_BASE_URL}/scheduler/config/machines`);
+    if (!response.ok) {
+        throw new Error('Failed to fetch scheduler machines');
+    }
+    return response.json();
+}
+
+export async function createSchedulerMachine(body: CreateMachineInput): Promise<SchedulerMachine> {
+    const response = await fetch(`${API_BASE_URL}/scheduler/config/machines`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+        const j = await response.json().catch(() => ({}));
+        throw new Error(typeof j.error === 'string' ? j.error : JSON.stringify(j.error ?? response.statusText));
+    }
+    return response.json();
+}
+
+export async function createSchedulerOperation(
+    machineId: string,
+    body: CreateOperationBodyInput
+): Promise<SchedulerOperation> {
+    const response = await fetch(
+        `${API_BASE_URL}/scheduler/config/machines/${machineId}/operations`,
+        {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        }
+    );
+    if (!response.ok) {
+        const j = await response.json().catch(() => ({}));
+        throw new Error(typeof j.error === 'string' ? j.error : JSON.stringify(j.error ?? response.statusText));
+    }
+    return response.json();
+}
+
+export async function updateSchedulerOperation(
+    machineId: string,
+    operationId: string,
+    body: UpdateOperationBodyInput
+): Promise<SchedulerOperation> {
+    const response = await fetch(
+        `${API_BASE_URL}/scheduler/config/machines/${machineId}/operations/${operationId}`,
+        {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        }
+    );
+    if (!response.ok) {
+        const j = await response.json().catch(() => ({}));
+        throw new Error(typeof j.error === 'string' ? j.error : JSON.stringify(j.error ?? response.statusText));
+    }
+    return response.json();
+}
+
+export async function patchSchedulerMachine(
+    machineId: string,
+    body: PatchMachineInput
+): Promise<SchedulerMachine> {
+    const response = await fetch(`${API_BASE_URL}/scheduler/config/machines/${machineId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+        const j = await response.json().catch(() => ({}));
+        throw new Error(typeof j.error === 'string' ? j.error : JSON.stringify(j.error ?? response.statusText));
+    }
+    return response.json();
+}
+
+export async function deleteSchedulerOperation(
+    machineId: string,
+    operationId: string
+): Promise<void> {
+    const response = await fetch(
+        `${API_BASE_URL}/scheduler/config/machines/${machineId}/operations/${operationId}`,
+        { method: 'DELETE' }
+    );
+    if (!response.ok) {
+        const j = await response.json().catch(() => ({}));
+        throw new Error(typeof j.error === 'string' ? j.error : JSON.stringify(j.error ?? response.statusText));
+    }
+}
+
+export async function fetchSchedulerRouting(): Promise<TimeEstimatorSettingsRow> {
+    const response = await fetch(`${API_BASE_URL}/scheduler/settings/routing`);
+    if (!response.ok) {
+        throw new Error('Failed to fetch routing settings');
+    }
+    return response.json();
+}
+
+export async function putSchedulerRouting(
+    flow: SchedulerRoutingFlow
+): Promise<TimeEstimatorSettingsRow> {
+    const response = await fetch(`${API_BASE_URL}/scheduler/settings/routing`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(flow),
+    });
+    if (!response.ok) {
+        const j = await response.json().catch(() => ({}));
+        throw new Error(typeof j.error === 'string' ? j.error : JSON.stringify(j.error ?? response.statusText));
     }
     return response.json();
 }

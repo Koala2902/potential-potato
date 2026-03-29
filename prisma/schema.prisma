@@ -1,0 +1,170 @@
+// Production scheduler — PostgreSQL app database from `DATABASE_URL` or `APP_DB_*`
+// (see server/db/database-config.ts). All models below use schema `scheduler`
+// (in pgAdmin: Database → Schemas → scheduler → Tables → Job, Machine, …). Not in `public`.
+
+generator client {
+  provider = "prisma-client-js"
+  previewFeatures = ["multiSchema"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  schemas  = ["scheduler"]
+}
+
+model Machine {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  displayName String
+  enabled     Boolean  @default(true)
+  sortOrder   Int
+  constants   Json     @default("{}")
+  operations  Operation[]
+
+  @@schema("scheduler")
+}
+
+model Operation {
+  id          String   @id @default(uuid())
+  machineId   String
+  machine     Machine  @relation(fields: [machineId], references: [id], onDelete: Cascade)
+  name        String
+  type        String
+  sortOrder   Int
+  enabled     Boolean  @default(true)
+  notes       String?
+  calcFnKey   String?
+  params      OperationParam[]
+  batchRule   BatchRule?
+  materialOverrides MaterialOverride[]
+  dependencies OperationDependency[]
+
+  @@schema("scheduler")
+}
+
+model OperationParam {
+  id             String    @id @default(uuid())
+  operationId    String
+  operation      Operation @relation(fields: [operationId], references: [id], onDelete: Cascade)
+  key            String
+  value          Json
+  valueType      String
+  label          String
+  unit           String?
+  isConfigurable Boolean
+  sortOrder      Int
+
+  @@unique([operationId, key])
+  @@schema("scheduler")
+}
+
+model BatchRule {
+  id              String    @id @default(uuid())
+  operationId     String    @unique
+  operation       Operation @relation(fields: [operationId], references: [id], onDelete: Cascade)
+  scope           String
+  groupByFields   String[]  @default([])
+  appliesOnce     Boolean
+  thresholdValue  Int?
+  routeToMachine  String?
+  conditionExpr   String?
+
+  @@schema("scheduler")
+}
+
+model MaterialOverride {
+  id            String    @id @default(uuid())
+  operationId   String
+  operation     Operation @relation(fields: [operationId], references: [id], onDelete: Cascade)
+  materialKey   String
+  paramKey      String
+  overrideValue Json
+  notes         String?
+  enabled       Boolean   @default(true)
+
+  @@unique([operationId, materialKey, paramKey])
+  @@schema("scheduler")
+}
+
+model OperationDependency {
+  id            String    @id @default(uuid())
+  operationId   String
+  operation     Operation @relation(fields: [operationId], references: [id], onDelete: Cascade)
+  requiresParam String
+  requiresValue String
+
+  @@schema("scheduler")
+}
+
+model Connector {
+  id     String @id @default(uuid())
+  name   String
+  type   String
+  enabled Boolean @default(true)
+  config Json   @default("{}")
+  jobs   Job[]
+
+  @@schema("scheduler")
+}
+
+/// Defaults for Production Time Estimator (Enfocus Switch time_v1_sscript): Indigo, semi-rotary, cutting, finishing multipliers, coating/slitting constants.
+model TimeEstimatorSettings {
+  id             String   @id @default(uuid())
+  key            String   @unique
+  label          String?
+  flowProperties Json     @default("{}")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@schema("scheduler")
+}
+
+model Job {
+  id               String    @id @default(uuid())
+  source           String
+  connectorId      String?
+  connector        Connector? @relation(fields: [connectorId], references: [id], onDelete: SetNull)
+  externalId       String?
+  scheduledDate    DateTime?
+  createdAt        DateTime  @default(now())
+  pdfQty           Int
+  material         String
+  printColour      String
+  finishing        String
+  productionPath   String
+  rollQty          Int?
+  rollDirection    String?
+  coreSizes        String[]  @default([])
+  dueDate          DateTime?
+  labelWidthMm     Float?
+  labelHeightMm    Float?
+  labelGapMm       Float?
+  labelsAcross     Int?
+  labelOuterWidthMm Float?
+  labelSizeId      String?
+  overlaminateFilm String?
+  rollLengthMetres Float?
+  forClient        Boolean?
+  isSlitted        Boolean?
+  timingSource     String?
+  timingMinutes    Float?
+  timingBreakdown  Json?
+
+  /// Aligns with Switch `Copies` when set; else use pdfQty in app logic.
+  copies                  Int?
+  /// `DieNumberDigital` / DieMetadata.AcrossNumber for digital cutting path.
+  dieNumberDigital        Int?
+  /// Semi-rotary `PlateHeight` (mm).
+  plateHeightMm           Float?
+  /// DieMetadata + job vars: AcrossNumber, AroundNumber, DocumentWidth/Height, GapAcross, ProductMaterial, ProductFinishing, Copies, PlateHeight, etc.
+  switchDieInput          Json?
+  /// All private-data outputs from time_v1_sscript (ProductionEst*, breakdowns, status).
+  switchEstimateOutput    Json?
+  timeEstimationStatus    String?
+  timeEstimationError     String?
+  timeEstimationAt        DateTime?
+
+  @@index([connectorId, externalId])
+  @@schema("scheduler")
+}

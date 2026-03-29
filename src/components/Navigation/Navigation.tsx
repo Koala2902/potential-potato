@@ -1,7 +1,7 @@
-import { Settings, Calendar, Factory, Activity } from 'lucide-react';
+import { Settings, Factory, CalendarDays, Cog } from 'lucide-react';
 import './Navigation.css';
 
-type Page = 'operation' | 'schedule' | 'production' | 'jobstatus';
+type Page = 'operation' | 'production' | 'schedule' | 'config';
 
 interface NavigationProps {
     currentPage: Page;
@@ -11,9 +11,9 @@ interface NavigationProps {
 export default function Navigation({ currentPage, onPageChange }: NavigationProps) {
     const tabs = [
         { id: 'operation' as Page, label: 'Operation', icon: Settings },
-        { id: 'schedule' as Page, label: 'Schedule', icon: Calendar },
         { id: 'production' as Page, label: 'Production', icon: Factory },
-        { id: 'jobstatus' as Page, label: 'Job Status', icon: Activity },
+        { id: 'schedule' as Page, label: 'Schedule', icon: CalendarDays },
+        { id: 'config' as Page, label: 'Config', icon: Cog },
     ];
 
     return (
@@ -25,6 +25,14 @@ export default function Navigation({ currentPage, onPageChange }: NavigationProp
                 return (
                     <button
                         key={tab.id}
+                        type="button"
+                        data-testid={
+                            tab.id === 'schedule'
+                                ? 'nav-schedule'
+                                : tab.id === 'config'
+                                  ? 'nav-config'
+                                  : undefined
+                        }
                         className={`nav-tab ${isActive ? 'active' : ''}`}
                         onClick={() => onPageChange(tab.id)}
                     >

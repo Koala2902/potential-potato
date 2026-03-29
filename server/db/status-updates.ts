@@ -1,19 +1,21 @@
-import { jobmanagerPool } from './jobmanager-connection.js';
-import pg from 'pg';
+/**
+ * Scan processing: validates operation ids against `scheduler.Operation` (Prisma on app DB)
+ * (canonical catalog; see `operations-catalog.ts`). Logs `scanned_codes` hold the payload.
+ */
 import dotenv from 'dotenv';
+
+import { appPool } from './app-connection.js';
+import logsPool from './connection.js';
+import { isUndefinedTableError } from './pg-errors.js';
+import { prisma } from './prisma.js';
 
 dotenv.config();
 
-const { Pool } = pg;
+/** Log once if `"print OS"` table is absent (avoids spam every processing tick). */
+let printOsTableMissingLogged = false;
 
-// Connection to logs database
-const logsPool = new Pool({
-    host: process.env.DB_HOST || 'localhost',
-    port: parseInt(process.env.DB_PORT || '5432'),
-    database: 'logs',
-    user: process.env.DB_USER || 'postgres',
-    password: process.env.DB_PASSWORD || 'postgres',
-});
+/** Log once if `production_planner_paths` is missing on the app DB. */
+let productionPlannerPathsMissingLogged = false;
 
 interface PrintOSRecord {
     id: number;
@@ -29,7 +31,7 @@ interface PrintOSRecord {
  * Get last processed marker for a given marker type
  */
 async function getLastProcessedMarker(markerType: 'print_os' | 'scanned_codes'): Promise<number> {
-    const client = await jobmanagerPool.connect();
+    const client = await appPool.connect();
     try {
         const result = await client.query(
             'SELECT last_processed_id FROM processing_markers WHERE marker_type = $1',
@@ -41,6 +43,14 @@ async function getLastProcessedMarker(markerType: 'print_os' | 'scanned_codes'):
         }
         
         return parseInt(result.rows[0].last_processed_id) || 0;
+    } catch (e) {
+        if (isUndefinedTableError(e)) {
+            console.warn(
+                '[getLastProcessedMarker] processing_markers missing on app DB — run npm run run-migrations. Using 0.'
+            );
+            return 0;
+        }
+        throw e;
     } finally {
         client.release();
     }
@@ -50,7 +60,7 @@ async function getLastProcessedMarker(markerType: 'print_os' | 'scanned_codes'):
  * Update last processed marker
  */
 async function updateLastProcessedMarker(markerType: 'print_os' | 'scanned_codes', markerId: number): Promise<void> {
-    const client = await jobmanagerPool.connect();
+    const client = await appPool.connect();
     try {
         // Use INSERT ... ON CONFLICT to create marker if it doesn't exist
         await client.query(
@@ -62,6 +72,14 @@ async function updateLastProcessedMarker(markerType: 'print_os' | 'scanned_codes
                  updated_at = NOW()`,
             [markerType, markerId]
         );
+    } catch (e) {
+        if (isUndefinedTableError(e)) {
+            console.warn(
+                '[updateLastProcessedMarker] processing_markers missing on app DB — run npm run run-migrations. Skipping.'
+            );
+            return;
+        }
+        throw e;
     } finally {
         client.release();
     }
@@ -71,7 +89,7 @@ async function updateLastProcessedMarker(markerType: 'print_os' | 'scanned_codes
  * Get file_ids for an imposition_id
  */
 async function getFileIdsForImposition(impositionId: string): Promise<string[]> {
-    const client = await logsPool.connect();
+    const client = await appPool.connect();
     try {
         const result = await client.query(
             'SELECT file_id FROM imposition_file_mapping WHERE imposition_id = $1 ORDER BY sequence_order NULLS LAST, file_id',
@@ -167,7 +185,7 @@ function parseManualPrepressFile(name: string): { jobId: string } | null {
  * Get all version_tags for a job_id from job_operations table
  */
 async function getAllVersionTagsForJob(jobId: string): Promise<string[]> {
-    const client = await logsPool.connect();
+    const client = await appPool.connect();
     try {
         const result = await client.query(
             'SELECT DISTINCT version_tag FROM job_operations WHERE job_id = $1',
@@ -180,29 +198,21 @@ async function getAllVersionTagsForJob(jobId: string): Promise<string[]> {
 }
 
 /**
- * Get operation_id for print operation from operations table
+ * Get operation_id for print operation from scheduler.Operation
  */
 async function getPrintOperationId(): Promise<string> {
-    const client = await logsPool.connect();
-    try {
-        // Try to find print operation (operations table is in logs database)
-        const result = await client.query(
-            `SELECT operation_id FROM operations 
-             WHERE LOWER(operation_name) LIKE '%print%' 
-             LIMIT 1`
-        );
-        
-        if (result.rows.length > 0) {
-            const opId = result.rows[0].operation_id;
-            // Return lowercase to match job_operations table format
-            return opId.toLowerCase();
-        }
-        
-        // Fallback: use common operation IDs (lowercase)
-        return 'op001';
-    } finally {
-        client.release();
+    const op = await prisma.operation.findFirst({
+        where: {
+            name: { contains: 'print', mode: 'insensitive' },
+            enabled: true,
+        },
+        orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
+        select: { id: true },
+    });
+    if (op) {
+        return op.id.toLowerCase();
     }
+    return 'op001';
 }
 
 /**
@@ -236,7 +246,7 @@ async function updateImpositionOperation(
     completedAt: Date,
     completedBy: 'scanner' | 'print_os' = 'scanner'
 ): Promise<void> {
-    const client = await logsPool.connect();
+    const client = await appPool.connect();
     try {
         // Try UPDATE first (row should already exist in imposition_operations)
         // If row doesn't exist, that's okay - it means this operation wasn't planned for this imposition
@@ -299,7 +309,7 @@ async function updateJobOperation(
     completedAt: Date,
     completedBy: 'scanner' | 'print_os' = 'scanner'
 ): Promise<void> {
-    const client = await logsPool.connect();
+    const client = await appPool.connect();
     try {
         // Try UPDATE (row should already exist in job_operations)
         // If row doesn't exist, that's okay - it means this operation wasn't planned for this job
@@ -378,14 +388,17 @@ async function updateJobOperation(
         // Stores result in job_operation_duration table (separate from job_operations)
         // NOTE: Skip op001 (print operation) - it has its own duration from Print OS
         if (completedBy === 'scanner' && status === 'completed' && operationId !== 'op001') {
+            const logsClient = await logsPool.connect();
             try {
-                await client.query(
+                await logsClient.query(
                     `SELECT update_operation_duration($1, $2, $3)`,
                     [jobId, versionTag, operationId]
                 );
             } catch (durationError: any) {
                 // Log but don't fail - duration calculation is optional
                 console.warn(`Could not calculate operation duration for job_id=${jobId}, version_tag=${versionTag}, operation_id=${operationId}:`, durationError.message);
+            } finally {
+                logsClient.release();
             }
         }
         
@@ -550,7 +563,7 @@ async function updateJobOperationsField(
     operationName: string,
     value: boolean
 ): Promise<void> {
-    const client = await jobmanagerPool.connect();
+    const client = await appPool.connect();
     try {
         // Update the operations JSONB field and status
         await client.query(
@@ -579,7 +592,7 @@ async function updateJobOperationsField(
  * Get all file_ids for a job_id across all impositions
  */
 async function getAllFileIdsForJob(jobId: string, versionTag: string): Promise<string[]> {
-    const client = await logsPool.connect();
+    const client = await appPool.connect();
     try {
         // Find all file_ids that match this job_id and version_tag
         const pattern = `FILE_${versionTag}_Labex_${jobId}_%`;
@@ -601,8 +614,7 @@ async function getAllFileIdsForJob(jobId: string, versionTag: string): Promise<s
  * Check if all files for a job are printed and update job status accordingly
  */
 async function checkAndUpdateJobPrintStatus(jobId: string, versionTag: string): Promise<void> {
-    const client = await logsPool.connect();
-    const jobmanagerClient = await jobmanagerPool.connect();
+    const client = await appPool.connect();
     
     try {
         // Get all file_ids for this job/version
@@ -648,7 +660,7 @@ async function checkAndUpdateJobPrintStatus(jobId: string, versionTag: string): 
         // Update job status based on completion
         if (printedImpositions === totalImpositions && totalImpositions > 0) {
             // All impositions printed - update operations and status
-            await jobmanagerClient.query(
+            await client.query(
                 `UPDATE jobs 
                  SET operations = jsonb_set(
                      COALESCE(operations, '{}'::jsonb),
@@ -668,7 +680,7 @@ async function checkAndUpdateJobPrintStatus(jobId: string, versionTag: string): 
             console.log(`  ✓ Job ${jobId} (v${versionTag}): All ${totalImpositions} impositions printed`);
         } else if (abortedImpositions === totalImpositions && totalImpositions > 0) {
             // All impositions aborted
-            await jobmanagerClient.query(
+            await client.query(
                 `UPDATE jobs 
                  SET operations = jsonb_set(
                      COALESCE(operations, '{}'::jsonb),
@@ -683,7 +695,7 @@ async function checkAndUpdateJobPrintStatus(jobId: string, versionTag: string): 
             console.log(`  ✗ Job ${jobId} (v${versionTag}): All ${totalImpositions} impositions aborted`);
         } else if (printedImpositions > 0) {
             // Partial completion - update status to started
-            await jobmanagerClient.query(
+            await client.query(
                 `UPDATE jobs 
                  SET status = CASE 
                      WHEN status IS NULL OR status = '' THEN 'started'
@@ -698,7 +710,6 @@ async function checkAndUpdateJobPrintStatus(jobId: string, versionTag: string): 
         }
     } finally {
         client.release();
-        jobmanagerClient.release();
     }
 }
 
@@ -721,18 +732,37 @@ export async function processPrintOSRecords(): Promise<{
     console.log(`Processing Print OS records with marker > ${lastProcessedMarker}`);
 
     // Get unprocessed Print OS records
-    const printOSClient = await jobmanagerPool.connect();
+    const printOSClient = await appPool.connect();
 
     try {
         // Query "print OS" table (note: table name has space, must be quoted)
         // Get all records, then deduplicate by name (imposition_id) keeping only the latest (highest marker)
-        const printOSResult = await printOSClient.query(
-            `SELECT id, name, status, marker, job_complete_time, copies, payload 
-             FROM "print OS" 
-             WHERE marker > $1 
-             ORDER BY marker ASC`,
-            [lastProcessedMarker]
-        );
+        let printOSResult;
+        try {
+            printOSResult = await printOSClient.query(
+                `SELECT id, name, status, marker, job_complete_time, copies, payload 
+                 FROM "print OS" 
+                 WHERE marker > $1 
+                 ORDER BY marker ASC`,
+                [lastProcessedMarker]
+            );
+        } catch (e) {
+            if (isUndefinedTableError(e)) {
+                if (!printOsTableMissingLogged) {
+                    printOsTableMissingLogged = true;
+                    console.warn(
+                        '[processPrintOSRecords] table "print OS" missing on app DB — skipping Print OS processing.'
+                    );
+                }
+                return {
+                    processed: 0,
+                    jobsUpdated: 0,
+                    lastMarker: lastProcessedMarker,
+                    errors: [],
+                };
+            }
+            throw e;
+        }
 
         // Deduplicate: Group by name (imposition_id) and keep only the latest record (highest marker)
         const recordsMap = new Map<string, PrintOSRecord>();
@@ -970,38 +1000,26 @@ export async function processPrintOSRecords(): Promise<{
 }
 
 /**
- * Verify that an operation_id exists in the database
+ * Verify that an operation_id exists in scheduler.Operation (app DB).
+ * Match is case-insensitive; catalog rows are typically lowercase op001…
  */
 async function verifyOperationIdExists(operationId: string): Promise<boolean> {
-    const client = await jobmanagerPool.connect();
-    try {
-        const result = await client.query(
-            `SELECT EXISTS(SELECT 1 FROM operations WHERE operation_id = $1 LIMIT 1)`,
-            [operationId]
-        );
-        return result.rows[0].exists;
-    } finally {
-        client.release();
-    }
+    const found = await prisma.operation.findFirst({
+        where: { id: { equals: operationId, mode: 'insensitive' } },
+        select: { id: true },
+    });
+    return found != null;
 }
 
 /**
- * Get operation name by operation_id
- * Note: operations table is in logs database, uses lowercase (op001, op002, etc.)
+ * Get operation name by operation_id (scheduler.Operation.id)
  */
 async function getOperationNameById(operationId: string): Promise<string | null> {
-    const client = await logsPool.connect();
-    try {
-        // Normalize to lowercase for querying (logs operations table uses lowercase)
-        const normalizedId = operationId.toLowerCase();
-        const result = await client.query(
-            `SELECT operation_name FROM operations WHERE LOWER(operation_id) = $1 LIMIT 1`,
-            [normalizedId]
-        );
-        return result.rows.length > 0 ? result.rows[0].operation_name : null;
-    } finally {
-        client.release();
-    }
+    const op = await prisma.operation.findFirst({
+        where: { id: { equals: operationId, mode: 'insensitive' } },
+        select: { name: true },
+    });
+    return op?.name ?? null;
 }
 
 /**
@@ -1009,62 +1027,62 @@ async function getOperationNameById(operationId: string): Promise<string | null>
  * This maps frontend operation names to database operation_ids
  */
 async function getOperationIdByName(operationName: string): Promise<string | null> {
-    const client = await logsPool.connect();
-    try {
-        // Try to find operation by name (case insensitive, partial match)
-        const normalized = operationName.toLowerCase().trim();
-        
-        // Map common operation names to operation_ids
-        const operationMap: Record<string, string> = {
-            'print': 'op001',
-            'printing': 'op001',
-            'coat': 'op002',
-            'coating': 'op002',
-            'kiss-cut': 'op003',
-            'kiss cut': 'op003',
-            'kisscut': 'op003',
-            'slit': 'op004',
-            'slitter': 'op004',
-            'slitting': 'op004',
-            'laminate': 'op005',
-            'laminating': 'op005',
-        };
-        
-        // Check if we have a direct mapping
-        if (operationMap[normalized]) {
-            return operationMap[normalized];
-        }
-        
-        // Try to query operations table in logs database
-        const result = await client.query(
-            `SELECT operation_id FROM operations 
-             WHERE LOWER(operation_name) LIKE $1 
-             ORDER BY operation_id 
-             LIMIT 1`,
-            [`%${normalized}%`]
-        );
-        
-        if (result.rows.length > 0) {
-            return result.rows[0].operation_id.toLowerCase(); // Ensure lowercase
-        }
-        
-        return null;
-    } finally {
-        client.release();
+    const normalized = operationName.toLowerCase().trim();
+
+    const operationMap: Record<string, string> = {
+        print: 'op001',
+        printing: 'op001',
+        coat: 'op002',
+        coating: 'op002',
+        'kiss-cut': 'op003',
+        'kiss cut': 'op003',
+        kisscut: 'op003',
+        slit: 'op004',
+        slitter: 'op004',
+        slitting: 'op004',
+        laminate: 'op005',
+        laminating: 'op005',
+    };
+
+    if (operationMap[normalized]) {
+        return operationMap[normalized];
     }
+
+    const op = await prisma.operation.findFirst({
+        where: {
+            name: { contains: normalized, mode: 'insensitive' },
+            enabled: true,
+        },
+        orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
+        select: { id: true },
+    });
+    if (op) {
+        return op.id.toLowerCase();
+    }
+
+    return null;
 }
 
 /**
  * Check if code_text is a runlist_id
  */
 async function isRunlistId(codeText: string): Promise<boolean> {
-    const client = await logsPool.connect();
+    if (productionPlannerPathsMissingLogged) {
+        return false;
+    }
+    const client = await appPool.connect();
     try {
         const result = await client.query(
             'SELECT EXISTS(SELECT 1 FROM production_planner_paths WHERE runlist_id = $1 LIMIT 1)',
             [codeText]
         );
         return result.rows[0].exists;
+    } catch (e) {
+        if (isUndefinedTableError(e)) {
+            productionPlannerPathsMissingLogged = true;
+            return false;
+        }
+        throw e;
     } finally {
         client.release();
     }
@@ -1074,18 +1092,34 @@ async function isRunlistId(codeText: string): Promise<boolean> {
  * Get all job_ids from a runlist_id
  */
 async function getJobIdsFromRunlist(runlistId: string): Promise<Map<string, Set<string>>> {
-    const client = await logsPool.connect();
+    if (productionPlannerPathsMissingLogged) {
+        return new Map();
+    }
+    const client = await appPool.connect();
     try {
         console.log(`[getJobIdsFromRunlist] Getting jobs for runlist: ${runlistId}`);
-        // Get all impositions in this runlist
-        const impositionsResult = await client.query(
-            'SELECT DISTINCT imposition_id FROM production_planner_paths WHERE runlist_id = $1',
-            [runlistId]
-        );
-        
+        let impositionsResult;
+        try {
+            impositionsResult = await client.query(
+                'SELECT DISTINCT imposition_id FROM production_planner_paths WHERE runlist_id = $1',
+                [runlistId]
+            );
+        } catch (e) {
+            if (isUndefinedTableError(e)) {
+                if (!productionPlannerPathsMissingLogged) {
+                    productionPlannerPathsMissingLogged = true;
+                    console.warn(
+                        '[getJobIdsFromRunlist] table "production_planner_paths" missing on app DB — run migrations. Skipping runlist expansion.'
+                    );
+                }
+                return new Map();
+            }
+            throw e;
+        }
+
         console.log(`[getJobIdsFromRunlist] Found ${impositionsResult.rows.length} impositions in runlist`);
         const jobMap = new Map<string, Set<string>>();
-        
+
         // For each imposition, get file_ids and extract job_ids
         for (const row of impositionsResult.rows) {
             const impositionId = row.imposition_id;
@@ -1122,7 +1156,10 @@ async function getJobIdsFromRunlist(runlistId: string): Promise<Map<string, Set<
  * Find runlist_id from job_id_version_tag scan
  */
 async function findRunlistByJobScan(codeText: string): Promise<string | null> {
-    const client = await logsPool.connect();
+    if (productionPlannerPathsMissingLogged) {
+        return null;
+    }
+    const client = await appPool.connect();
     try {
         // Parse job_id_version_tag format
         const parts = codeText.split('_');
@@ -1137,21 +1174,29 @@ async function findRunlistByJobScan(codeText: string): Promise<string | null> {
         // Match file_id pattern: FILE_<version>_Labex_<job_id>_*
         const pattern = `FILE_${version}_Labex_${jobId}_%`;
         
-        const result = await client.query(
-            `SELECT DISTINCT ppp.runlist_id
-             FROM imposition_file_mapping ifm
-             INNER JOIN production_planner_paths ppp ON ifm.imposition_id = ppp.imposition_id
-             WHERE ifm.file_id LIKE $1
-             AND ppp.runlist_id IS NOT NULL
-             LIMIT 1`,
-            [pattern]
-        );
-        
-        if (result.rows.length === 0) {
-            return null;
+        try {
+            const result = await client.query(
+                `SELECT DISTINCT ppp.runlist_id
+                 FROM imposition_file_mapping ifm
+                 INNER JOIN production_planner_paths ppp ON ifm.imposition_id = ppp.imposition_id
+                 WHERE ifm.file_id LIKE $1
+                 AND ppp.runlist_id IS NOT NULL
+                 LIMIT 1`,
+                [pattern]
+            );
+
+            if (result.rows.length === 0) {
+                return null;
+            }
+
+            return result.rows[0].runlist_id;
+        } catch (e) {
+            if (isUndefinedTableError(e)) {
+                productionPlannerPathsMissingLogged = true;
+                return null;
+            }
+            throw e;
         }
-        
-        return result.rows[0].runlist_id;
     } finally {
         client.release();
     }
@@ -1161,19 +1206,26 @@ async function findRunlistByJobScan(codeText: string): Promise<string | null> {
  * Get impositions for a job_id
  */
 async function getImpositionsForJob(jobId: string, versionTag: string): Promise<string[]> {
-    const client = await logsPool.connect();
+    const client = await appPool.connect();
     try {
         // Find file_ids that match this job_id and version_tag
         const pattern = `FILE_${versionTag}_Labex_${jobId}_%`;
-        
-        const result = await client.query(
-            `SELECT DISTINCT imposition_id 
-             FROM imposition_file_mapping 
-             WHERE file_id LIKE $1`,
-            [pattern]
-        );
-        
-        return result.rows.map(row => row.imposition_id);
+
+        try {
+            const result = await client.query(
+                `SELECT DISTINCT imposition_id 
+                 FROM imposition_file_mapping 
+                 WHERE file_id LIKE $1`,
+                [pattern]
+            );
+
+            return result.rows.map((row) => row.imposition_id);
+        } catch (e) {
+            if (isUndefinedTableError(e)) {
+                return [];
+            }
+            throw e;
+        }
     } finally {
         client.release();
     }
@@ -1197,17 +1249,30 @@ export async function processScannedCodes(): Promise<{
     const lastProcessedScanId = await getLastProcessedMarker('scanned_codes');
     console.log(`[processScannedCodes] Processing scanned codes with scan_id > ${lastProcessedScanId}`);
 
-    const scannedClient = await logsPool.connect(); // Use logs database pool
+    const scannedClient = await logsPool.connect();
 
     try {
-        // Get new scanned codes from logs database
-        const scannedResult = await scannedClient.query(
-            `SELECT scan_id, code_text, scanned_at, machine_id, operations, metadata
+        // Get new scanned codes from primary app DB
+        let scannedResult;
+        try {
+            scannedResult = await scannedClient.query(
+                `SELECT scan_id, code_text, scanned_at, machine_id, operations, metadata
              FROM scanned_codes
              WHERE scan_id > $1
              ORDER BY scan_id ASC`,
-            [lastProcessedScanId]
-        );
+                [lastProcessedScanId]
+            );
+        } catch (e) {
+            if (isUndefinedTableError(e)) {
+                return {
+                    processed: 0,
+                    jobsUpdated: 0,
+                    lastScanId: lastProcessedScanId,
+                    errors: [],
+                };
+            }
+            throw e;
+        }
 
         const scans = scannedResult.rows;
         console.log(`[processScannedCodes] Found ${scans.length} new scanned codes to process`);
@@ -1263,30 +1328,24 @@ export async function processScannedCodes(): Promise<{
                     continue;
                 }
 
-                // Validate operation_ids exist in the database
-                // Note: operations table uses uppercase (OP006), but job_operations uses lowercase (op006)
+                // Validate operation_ids against scheduler.Operation (canonical catalog on app DB)
                 const validOperationIds: string[] = [];
                 for (const op of operationsArray) {
                     const opId = typeof op === 'string' ? op : String(op);
-                    // Normalize to uppercase for checking against operations table
-                    const normalizedOpId = opId.toUpperCase();
-                    
-                    // Check if it's already an operation_id (format: op###) or needs conversion
-                    if (normalizedOpId.match(/^OP\d+$/)) {
-                        // It's already an operation_id, verify it exists (check uppercase)
-                        const exists = await verifyOperationIdExists(normalizedOpId);
+                    const trimmed = opId.trim();
+
+                    if (/^op\d+$/i.test(trimmed)) {
+                        const canonical = trimmed.toLowerCase();
+                        const exists = await verifyOperationIdExists(canonical);
                         if (exists) {
-                            // Store as lowercase to match job_operations format
-                            validOperationIds.push(normalizedOpId.toLowerCase());
+                            validOperationIds.push(canonical);
                         } else {
-                            console.warn(`Scan ${scanId}: Operation ID ${normalizedOpId} not found in database`);
-                            errors.push(`Scan ${scanId}: Invalid operation_id: ${normalizedOpId}`);
+                            console.warn(`Scan ${scanId}: Operation ID ${canonical} not found in database`);
+                            errors.push(`Scan ${scanId}: Invalid operation_id: ${canonical}`);
                         }
                     } else {
-                        // Try to convert operation name to operation_id
                         const convertedId = await getOperationIdByName(opId);
                         if (convertedId) {
-                            // Convert to lowercase to match job_operations format
                             validOperationIds.push(convertedId.toLowerCase());
                         } else {
                             console.warn(`Scan ${scanId}: Could not find operation_id for: ${opId}`);
@@ -1384,13 +1443,30 @@ export async function processScannedCodes(): Promise<{
                 // For runlist scans, get ALL impositions in the runlist upfront
                 let allRunlistImpositions: string[] = [];
                 if (isRunlistScan) {
-                    // Use the stored runlist_id if available (for derived scans), otherwise use codeText (for direct runlist scans)
                     const runlistIdToQuery = runlistIdForProcessing || codeText;
-                    const allImpositionsResult = await scannedClient.query(
-                        'SELECT DISTINCT imposition_id FROM production_planner_paths WHERE runlist_id = $1',
-                        [runlistIdToQuery]
-                    );
-                    allRunlistImpositions = allImpositionsResult.rows.map(row => row.imposition_id);
+                    if (productionPlannerPathsMissingLogged) {
+                        allRunlistImpositions = [];
+                    } else {
+                        try {
+                            const allImpositionsResult = await appPool.query(
+                                'SELECT DISTINCT imposition_id FROM production_planner_paths WHERE runlist_id = $1',
+                                [runlistIdToQuery]
+                            );
+                            allRunlistImpositions = allImpositionsResult.rows.map(
+                                (row: { imposition_id: string }) => row.imposition_id
+                            );
+                        } catch (e) {
+                            if (isUndefinedTableError(e)) {
+                                productionPlannerPathsMissingLogged = true;
+                                console.warn(
+                                    '[processScannedCodes] table "production_planner_paths" missing on app DB — run migrations. Runlist imposition updates skipped.'
+                                );
+                                allRunlistImpositions = [];
+                            } else {
+                                throw e;
+                            }
+                        }
+                    }
                     console.log(`Scan ${scanId}: Found ${allRunlistImpositions.length} impositions in runlist ${runlistIdToQuery}`);
                 }
                 

@@ -1,7 +1,7 @@
-import { jobmanagerPool } from './jobmanager-connection.js';
+import { appPool } from './app-connection.js';
 
 async function resetMarkers() {
-    const client = await jobmanagerPool.connect();
+    const client = await appPool.connect();
     try {
         // Reset both markers to 0
         await client.query(
@@ -25,7 +25,7 @@ async function resetMarkers() {
         });
     } finally {
         client.release();
-        await jobmanagerPool.end();
+        await appPool.end();
     }
 }
 

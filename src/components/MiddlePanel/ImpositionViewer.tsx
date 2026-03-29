@@ -17,6 +17,26 @@ export default function ImpositionViewer({ imposition }: ImpositionViewerProps) 
     useEffect(() => {
         setPdfError(null);
         setPdfLoading(true);
+        
+        // Check if PDF exists before trying to load it
+        if (imposition?.imposition_id) {
+            fetch(`/api/pdf/${imposition.imposition_id}`, { method: 'HEAD' })
+                .then(response => {
+                    if (!response.ok) {
+                        if (response.status === 404) {
+                            setPdfError('PDF not found in archive');
+                        } else {
+                            setPdfError(`Failed to load PDF (${response.status})`);
+                        }
+                        setPdfLoading(false);
+                    }
+                    // If OK, let the iframe handle loading
+                })
+                .catch(err => {
+                    console.error('Error checking PDF:', err);
+                    // Don't set error here - let the iframe try to load and handle errors
+                });
+        }
     }, [imposition?.imposition_id]);
 
     if (!imposition) {
@@ -38,6 +58,27 @@ export default function ImpositionViewer({ imposition }: ImpositionViewerProps) 
     const pdfUrl = `/api/pdf/${imposition.imposition_id}#view=FitV`;
 
     const handleIframeLoad = () => {
+        // Check if the iframe content actually loaded successfully
+        // Note: iframe onLoad fires even for error pages, so we need to check the content
+        const iframe = document.querySelector(`iframe[title="PDF Preview - ${imposition.imposition_id}"]`) as HTMLIFrameElement;
+        if (iframe) {
+            try {
+                // Try to access iframe content to check if it's an error page
+                // This might fail due to CORS, but that's okay - we'll rely on timeout
+                const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
+                if (iframeDoc) {
+                    const bodyText = iframeDoc.body?.textContent || '';
+                    if (bodyText.includes('PDF not found') || bodyText.includes('error')) {
+                        setPdfError('PDF not found');
+                        setPdfLoading(false);
+                        return;
+                    }
+                }
+            } catch (e) {
+                // CORS error - can't check content, assume it loaded fine
+                // The timeout will catch actual errors
+            }
+        }
         setPdfLoading(false);
     };
 

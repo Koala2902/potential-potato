@@ -1,5 +1,33 @@
-import { jobmanagerPool } from './jobmanager-connection.js';
-import pool from './connection.js'; // logs database pool
+import { appPool } from './app-connection.js';
+import logsPool from './connection.js';
+import { isUndefinedTableError } from './pg-errors.js';
+import { prisma } from './prisma.js';
+
+/**
+ * Scan pipeline contract: `scanned_codes.operations` JSONB uses `{ "operations": ["op001", ...] }`
+ * with lowercase op### ids matching `scheduler.Operation.id` on the app DB (canonical catalog).
+ */
+export function normalizeOperationsPayloadForStorage(
+    operations: Record<string, any> | null | undefined
+): Record<string, any> | null {
+    if (operations == null || typeof operations !== 'object') {
+        return operations ?? null;
+    }
+    const arr = operations.operations;
+    if (!Array.isArray(arr)) {
+        return operations;
+    }
+    return {
+        ...operations,
+        operations: arr.map((o) => {
+            const s = typeof o === 'string' ? o.trim() : String(o);
+            if (/^op\d+$/i.test(s)) {
+                return s.toLowerCase();
+            }
+            return o;
+        }),
+    };
+}
 
 // Import parseFileId function to extract job_id and version_tag from file_id
 // We'll need to duplicate the function here or import it
@@ -79,29 +107,23 @@ export interface ScannedCode {
     metadata: Record<string, any> | null;
 }
 
-// Get all machines
+/** Presses from `scheduler.Machine` on the app DB (`DATABASE_URL`) — single catalog (no `public.machines`). */
 export async function getMachines(): Promise<Machine[]> {
-    const client = await jobmanagerPool.connect();
-    try {
-        const result = await client.query(`
-            SELECT 
-                machine_id,
-                machine_name,
-                machine_type,
-                capabilities,
-                hourly_rate_aud,
-                max_web_width_mm,
-                availability_status,
-                maintenance_schedule,
-                shift_hours
-            FROM machines
-            WHERE availability_status != 'inactive' OR availability_status IS NULL
-            ORDER BY machine_name
-        `);
-        return result.rows;
-    } finally {
-        client.release();
-    }
+    const rows = await prisma.machine.findMany({
+        where: { enabled: true },
+        orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+    });
+    return rows.map((m) => ({
+        machine_id: m.id,
+        machine_name: m.displayName || m.name,
+        machine_type: '',
+        capabilities: null,
+        hourly_rate_aud: null,
+        max_web_width_mm: null,
+        availability_status: m.enabled ? 'available' : 'inactive',
+        maintenance_schedule: null,
+        shift_hours: null,
+    }));
 }
 
 export interface Operation {
@@ -111,27 +133,66 @@ export interface Operation {
     created_at?: string;
 }
 
-// Get all available operations from logs database (no machine filtering)
-export async function getAvailableOperations(machineId?: string | null): Promise<Operation[]> {
-    // Import logs pool (default export)
-    const logsPool = (await import('./connection.js')).default;
-    
-    const client = await logsPool.connect();
+/** Preset bundles from `machine_modes` (optional). */
+export interface MachineMode {
+    mode_id: number;
+    machine_id: string;
+    label: string;
+    operation_ids: string[];
+    sort_order: number;
+}
+
+export async function getMachineModes(
+    machineId: string | null | undefined
+): Promise<MachineMode[]> {
+    const mid = machineId?.trim();
+    if (!mid) {
+        return [];
+    }
+    const client = await appPool.connect();
     try {
-        const result = await client.query(`
-            SELECT 
-                operation_id,
-                operation_name,
-                description,
-                created_at
-            FROM operations
-            ORDER BY operation_id
-        `);
-        
-        return result.rows;
+        const result = await client.query(
+            `SELECT mode_id, machine_id, label, operation_ids, sort_order
+             FROM machine_modes
+             WHERE machine_id = $1
+             ORDER BY sort_order ASC, label ASC`,
+            [mid]
+        );
+        return result.rows.map((r) => ({
+            mode_id: r.mode_id,
+            machine_id: r.machine_id,
+            label: r.label,
+            operation_ids: Array.isArray(r.operation_ids)
+                ? r.operation_ids.map((x: string) => String(x).toLowerCase())
+                : [],
+            sort_order: Number(r.sort_order),
+        }));
+    } catch (e) {
+        if (isUndefinedTableError(e)) {
+            return [];
+        }
+        throw e;
     } finally {
         client.release();
     }
+}
+
+/** Operations for a press from `scheduler.Operation` (scan codes = `id`, e.g. op001). */
+export async function getAvailableOperations(machineId?: string | null): Promise<Operation[]> {
+    const mid = machineId?.trim() || null;
+    if (!mid) {
+        return [];
+    }
+    const rows = await prisma.operation.findMany({
+        where: { machineId: mid, enabled: true },
+        orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
+    });
+    return rows.map((o) => ({
+        operation_id: o.id,
+        operation_name: o.name,
+        description: o.notes ?? undefined,
+        created_at: undefined,
+    }));
 }
 
 // Legacy function for backward compatibility - maps operation_name to operation code
@@ -149,7 +210,7 @@ export function getOperationCode(operationName: string): string {
     return normalized.replace(/\s+/g, '_');
 }
 
-// Record a scanned code (now in logs database)
+// Record a scanned code (primary app DB)
 export async function recordScannedCode(
     codeText: string,
     machineId: string | null,
@@ -157,7 +218,7 @@ export async function recordScannedCode(
     operations: Record<string, any> | null = null,
     metadata: Record<string, any> | null = null
 ): Promise<ScannedCode> {
-    const client = await pool.connect(); // Use logs database pool
+    const client = await logsPool.connect();
     try {
         const result = await client.query(`
             INSERT INTO scanned_codes (
@@ -170,7 +231,13 @@ export async function recordScannedCode(
             )
             VALUES ($1, NOW(), $2, $3, $4, $5)
             RETURNING *
-        `, [codeText, machineId, userId, operations ? JSON.stringify(operations) : null, metadata ? JSON.stringify(metadata) : null]);
+        `, [
+            codeText,
+            machineId,
+            userId,
+            operations ? JSON.stringify(normalizeOperationsPayloadForStorage(operations)) : null,
+            metadata ? JSON.stringify(metadata) : null,
+        ]);
 
         return result.rows[0];
     } finally {
@@ -188,10 +255,11 @@ export async function recordRunlistScans(
     operations: Record<string, any> | null = null,
     additionalMetadata: Record<string, any> | null = null
 ): Promise<ScannedCode[]> {
-    const client = await pool.connect();
+    const appClient = await appPool.connect();
+    const logsClient = await logsPool.connect();
     try {
         // Get all file_ids in this runlist
-        const fileIdsResult = await client.query(`
+        const fileIdsResult = await appClient.query(`
             SELECT DISTINCT ifm.file_id
             FROM imposition_file_mapping ifm
             INNER JOIN production_planner_paths ppp ON ifm.imposition_id = ppp.imposition_id
@@ -232,7 +300,7 @@ export async function recordRunlistScans(
             const codeText = `${parsed.jobId}_${parsed.versionTag}`;
             
             try {
-                const result = await client.query(`
+                const result = await logsClient.query(`
                     INSERT INTO scanned_codes (
                         code_text,
                         scanned_at,
@@ -247,7 +315,7 @@ export async function recordRunlistScans(
                     codeText, // Use job_id_version_tag format (e.g., "4677_5995_1")
                     machineId,
                     userId,
-                    operations ? JSON.stringify(operations) : null,
+                    operations ? JSON.stringify(normalizeOperationsPayloadForStorage(operations)) : null,
                     JSON.stringify(metadata)
                 ]);
                 
@@ -260,16 +328,16 @@ export async function recordRunlistScans(
                     // If scan_id conflict, fix the sequence and retry
                     try {
                         // Get current max scan_id
-                        const maxIdResult = await client.query('SELECT MAX(scan_id) as max_id FROM scanned_codes');
+                        const maxIdResult = await logsClient.query('SELECT MAX(scan_id) as max_id FROM scanned_codes');
                         const maxId = maxIdResult.rows[0].max_id || 0;
                         const nextId = maxId + 1;
                         
                         // Reset sequence to next available ID (use true to set is_called)
-                        await client.query(`SELECT setval('scanned_codes_scan_id_seq', $1, true)`, [nextId]);
+                        await logsClient.query(`SELECT setval('scanned_codes_scan_id_seq', $1, true)`, [nextId]);
                         console.log(`[recordRunlistScans] Fixed sequence to ${nextId} for file_id ${fileId}`);
                         
                         // Retry insert with the same codeText
-                        const retryResult = await client.query(`
+                        const retryResult = await logsClient.query(`
                             INSERT INTO scanned_codes (
                                 code_text,
                                 scanned_at,
@@ -284,7 +352,7 @@ export async function recordRunlistScans(
                             codeText, // Use job_id_version_tag format
                             machineId,
                             userId,
-                            operations ? JSON.stringify(operations) : null,
+                            operations ? JSON.stringify(normalizeOperationsPayloadForStorage(operations)) : null,
                             JSON.stringify(metadata)
                         ]);
                         
@@ -305,13 +373,14 @@ export async function recordRunlistScans(
         console.log(`[recordRunlistScans] Recorded ${recordedScans.length} scans for runlist ${runlistId}`);
         return recordedScans;
     } finally {
-        client.release();
+        appClient.release();
+        logsClient.release();
     }
 }
 
 // Get job by job_id or job_number
 export async function getJobByIdentifier(identifier: string): Promise<any | null> {
-    const client = await jobmanagerPool.connect();
+    const client = await appPool.connect();
     try {
         // Try job_id first
         let result = await client.query(`
@@ -334,6 +403,7 @@ export async function getJobByIdentifier(identifier: string): Promise<any | null
 export interface JobFilterOptions {
     labexOnly?: boolean;
     status?: string;
+    excludeStatus?: string | string[];
     material?: string;
     finishing?: string;
     hasPrint?: boolean;
@@ -341,7 +411,9 @@ export interface JobFilterOptions {
     hasKissCut?: boolean;
     hasBackscore?: boolean;
     hasSlitter?: boolean;
+    /** ISO — filters by latest_completed_at (last scan time) */
     dateFrom?: string;
+    /** ISO — filters by latest_completed_at (last scan time) */
     dateTo?: string;
     limit?: number;
 }
@@ -349,121 +421,265 @@ export interface JobFilterOptions {
 // Removed getScannedOperationsFromScannedCodes() - no longer needed
 // The SQL function has_scanned_operation() in the view now handles scanned_codes directly
 
-// Get all jobs grouped by job_id from job_status_view (logs database)
-// Uses a pre-computed view for better performance
-// Also checks scanned_codes table to include unprocessed scans
-export async function getJobs(filters?: JobFilterOptions): Promise<any[]> {
-    const client = await pool.connect();
-    try {
-        // Query from pre-computed view (faster than aggregating on-the-fly)
-        // For production_finished jobs, only show last 14 days
-        let query = `SELECT * FROM job_status_view WHERE 1=1
-            AND (
+/** WHERE fragment (after `WHERE 1=1`) for job_status_view / job_status_runlist_view filters. */
+function buildJobStatusViewWhere(
+    filters: JobFilterOptions | undefined,
+    excludeFinished: boolean,
+    onlyFinished: boolean
+): { fragment: string; params: any[] } {
+    const params: any[] = [];
+    let i = 1;
+    let fragment = '';
+    if (onlyFinished) {
+        fragment += ` AND status = 'production_finished'`;
+    } else if (excludeFinished) {
+        fragment += ` AND status != 'production_finished'`;
+    } else {
+        fragment += ` AND (
                 status != 'production_finished' 
                 OR latest_completed_at >= NOW() - INTERVAL '14 days'
             )`;
-        const params: any[] = [];
-        let paramIndex = 1;
+    }
+    if (filters?.status && !onlyFinished) {
+        fragment += ` AND status = $${i++}`;
+        params.push(filters.status);
+    }
+    // Last scan / latest activity (filters out stale jobs when date range is set)
+    if (filters?.dateFrom) {
+        fragment += ` AND latest_completed_at >= $${i++}`;
+        params.push(filters.dateFrom);
+    }
+    if (filters?.dateTo) {
+        fragment += ` AND latest_completed_at <= $${i++}`;
+        params.push(filters.dateTo);
+    }
+    return { fragment, params };
+}
 
-        // Status filter
-        if (filters?.status) {
-            query += ` AND status = $${paramIndex}`;
-            params.push(filters.status);
-            paramIndex++;
-        }
+const RUNLIST_BATCH_SIZE = 80;
 
-        // Date range filters (using earliest_completed_at as proxy for created_at)
-        if (filters?.dateFrom) {
-            query += ` AND earliest_completed_at >= $${paramIndex}`;
-            params.push(filters.dateFrom);
-            paramIndex++;
-        }
-
-        if (filters?.dateTo) {
-            query += ` AND earliest_completed_at <= $${paramIndex}`;
-            params.push(filters.dateTo);
-            paramIndex++;
-        }
-
-        // Try to order by updated_at first (most recent first), fallback to created_at
-        let result;
-        const limitValue = filters?.limit && filters.limit > 0 ? filters.limit : null;
-        
-        try {
-            // Order by latest_completed_at DESC (most recent first), then by job_id for NULLs
-            // This shows most recently updated jobs first, regardless of status
-            query += ` ORDER BY latest_completed_at DESC NULLS LAST, job_id DESC`;
-            
-            // Don't apply limit here - let frontend filter by status and handle display
-            // The frontend will show all jobs across different status cards
-            result = await client.query(query, params);
-        } catch (error: any) {
-            // If latest_completed_at column doesn't exist, fallback to job_id
-            if (error.message.includes('column') && error.message.includes('does not exist')) {
-                query = query.replace(/ORDER BY.*/, 'ORDER BY job_id DESC');
-                if (limitValue) {
-                    const baseQuery = query.split('ORDER BY')[0];
-                    query = baseQuery + ` ORDER BY job_id DESC LIMIT $${paramIndex}`;
-                    params.push(limitValue);
-                }
-                result = await client.query(query, params);
-            } else {
-                throw error;
-            }
-        }
-
-        // Map results (status is already calculated in the view, including scanned_codes via SQL function)
-        // Also get runlist_id for each job by joining with production_planner_paths
-        const jobsWithRunlist = await Promise.all(result.rows.map(async (row) => {
-            // Get runlist_id for this job by finding it through file_ids
-            // We need to find any file_id that matches this job_id and get its runlist
-            let runlistId: string | null = null;
-            
-            try {
-                // Try to get runlist_id from any version_tag of this job
-                const versionTags = row.version_tags || [];
-                if (versionTags.length > 0) {
-                    // Use first version_tag to find runlist
-                    const versionTag = versionTags[0];
-                    const pattern = `FILE_${versionTag}_Labex_${row.job_id}_%`;
-                    
-                    const runlistResult = await client.query(
-                        `SELECT DISTINCT ppp.runlist_id
-                         FROM imposition_file_mapping ifm
-                         INNER JOIN production_planner_paths ppp ON ifm.imposition_id = ppp.imposition_id
-                         WHERE ifm.file_id LIKE $1
-                         AND ppp.runlist_id IS NOT NULL
-                         LIMIT 1`,
-                        [pattern]
-                    );
-                    
-                    if (runlistResult.rows.length > 0) {
-                        runlistId = runlistResult.rows[0].runlist_id;
-                    }
-                }
-            } catch (err) {
-                // If query fails, just leave runlistId as null
-                console.warn(`Could not get runlist_id for job ${row.job_id}:`, err);
-            }
-            
-            // Status is already calculated in the view via get_status_from_operations() 
-            // which checks both job_operations and scanned_codes via has_scanned_operation()
-            return {
+/** Resolve ALL runlist_ids for each job (a job can be in multiple runlists).
+ * Returns Map<job_id, runlist_id[]>. Searches all version_tags per job. */
+async function batchResolveRunlistIds(
+    client: import('pg').PoolClient,
+    rows: { job_id: string; version_tags?: string[] }[]
+): Promise<Map<string, string[]>> {
+    const patterns: { pattern: string; job_id: string }[] = [];
+    for (const row of rows) {
+        const versionTags = row.version_tags || [];
+        // Search all version_tags - each can be in a different runlist
+        for (const versionTag of versionTags) {
+            patterns.push({
+                pattern: `FILE_${versionTag}_Labex_${row.job_id}_%`,
                 job_id: row.job_id,
-                total_versions: parseInt(row.total_versions) || 0,
-                completed_versions: parseInt(row.completed_versions) || 0,
-                version_tags: row.version_tags || [],
-                status: row.status || 'print_ready', // Status already includes scanned_codes via SQL function
-                latest_completed_operation_id: row.latest_completed_operation_id || null,
-                created_at: row.earliest_completed_at || null,
-                updated_at: row.latest_completed_at || null,
-                runlist_id: runlistId,
-            };
-        }));
-        
-        return jobsWithRunlist;
+            });
+        }
+    }
+    if (patterns.length === 0) return new Map();
+
+    const runlistMap = new Map<string, Set<string>>();
+    for (let i = 0; i < patterns.length; i += RUNLIST_BATCH_SIZE) {
+        const chunk = patterns.slice(i, i + RUNLIST_BATCH_SIZE);
+        const orClauses = chunk.map((_, idx) => `ifm.file_id LIKE $${idx + 1}`).join(' OR ');
+        const params = chunk.map((p) => p.pattern);
+        try {
+            const runlistResult = await client.query(
+                `SELECT DISTINCT ifm.file_id, ppp.runlist_id
+                 FROM imposition_file_mapping ifm
+                 INNER JOIN production_planner_paths ppp ON ifm.imposition_id = ppp.imposition_id
+                 WHERE ppp.runlist_id IS NOT NULL AND (${orClauses})`,
+                params
+            );
+            for (const r of runlistResult.rows) {
+                const parsed = parseFileId(r.file_id);
+                if (parsed) {
+                    if (!runlistMap.has(parsed.jobId)) {
+                        runlistMap.set(parsed.jobId, new Set());
+                    }
+                    runlistMap.get(parsed.jobId)!.add(r.runlist_id);
+                }
+            }
+        } catch (err) {
+            console.warn('Batch runlist resolution failed for chunk:', err);
+        }
+    }
+    // Convert Set to array for easier consumption
+    const result = new Map<string, string[]>();
+    for (const [jobId, runlistIds] of runlistMap) {
+        result.set(jobId, Array.from(runlistIds));
+    }
+    return result;
+}
+
+function mapJobStatusRow(row: any): any {
+    return {
+        job_id: row.job_id,
+        total_versions: parseInt(row.total_versions, 10) || 0,
+        completed_versions: parseInt(row.completed_versions, 10) || 0,
+        version_tags: row.version_tags || [],
+        status: row.status || 'print_ready',
+        latest_completed_operation_id: row.latest_completed_operation_id || null,
+        created_at: row.earliest_completed_at || null,
+        updated_at: row.latest_completed_at || null,
+        runlist_id: row.runlist_id ?? null,
+    };
+}
+
+/** Primary path: read job_status_runlist_view (runlist resolved in Postgres). LIMIT applies to distinct jobs via CTE. */
+async function queryJobStatusRunlistView(
+    client: import('pg').PoolClient,
+    fragment: string,
+    baseParams: any[],
+    limitValue: number | null
+): Promise<any[]> {
+    const params = [...baseParams];
+    let primaryQuery: string;
+    if (limitValue) {
+        const limIdx = baseParams.length + 1;
+        primaryQuery = `
+      WITH limited_jobs AS (
+        SELECT job_id FROM job_status_view WHERE 1=1 ${fragment}
+        ORDER BY latest_completed_at DESC NULLS LAST, job_id DESC
+        LIMIT $${limIdx}
+      )
+      SELECT v.* FROM job_status_runlist_view v
+      INNER JOIN limited_jobs lj ON v.job_id = lj.job_id
+      ORDER BY v.latest_completed_at DESC NULLS LAST, v.job_id DESC, v.runlist_id NULLS LAST`;
+        params.push(limitValue);
+    } else {
+        primaryQuery = `SELECT * FROM job_status_runlist_view WHERE 1=1 ${fragment}
+      ORDER BY latest_completed_at DESC NULLS LAST, job_id DESC, runlist_id NULLS LAST`;
+    }
+
+    try {
+        const result = await client.query(primaryQuery, params);
+        return result.rows.map(mapJobStatusRow);
     } catch (error: any) {
-        // If view doesn't exist, fallback to direct query
+        if (error.message?.includes('column') && error.message?.includes('does not exist')) {
+            const fbParams = [...baseParams];
+            let fb: string;
+            if (limitValue) {
+                const limIdx = baseParams.length + 1;
+                fb = `
+      WITH limited_jobs AS (
+        SELECT job_id FROM job_status_view WHERE 1=1 ${fragment}
+        ORDER BY job_id DESC
+        LIMIT $${limIdx}
+      )
+      SELECT v.* FROM job_status_runlist_view v
+      INNER JOIN limited_jobs lj ON v.job_id = lj.job_id
+      ORDER BY v.job_id DESC, v.runlist_id NULLS LAST`;
+                fbParams.push(limitValue);
+            } else {
+                fb = `SELECT * FROM job_status_runlist_view WHERE 1=1 ${fragment}
+      ORDER BY job_id DESC, runlist_id NULLS LAST`;
+            }
+            const result = await client.query(fb, fbParams);
+            return result.rows.map(mapJobStatusRow);
+        }
+        throw error;
+    }
+}
+
+/** Fallback when migration 016 is not applied: job_status_view + batched LIKE runlist resolution. */
+async function getJobsUsingStatusViewAndBatch(
+    client: import('pg').PoolClient,
+    filters: JobFilterOptions | undefined,
+    excludeFinished: boolean,
+    onlyFinished: boolean,
+    limitValue: number | null
+): Promise<any[]> {
+    const { fragment, params: whereParams } = buildJobStatusViewWhere(filters, excludeFinished, onlyFinished);
+    const params = [...whereParams];
+    let query = `SELECT * FROM job_status_view WHERE 1=1${fragment}`;
+    let result;
+    try {
+        query += ` ORDER BY latest_completed_at DESC NULLS LAST, job_id DESC`;
+        if (limitValue) {
+            query += ` LIMIT $${params.length + 1}`;
+            params.push(limitValue);
+        }
+        result = await client.query(query, params);
+    } catch (error: any) {
+        if (error.message?.includes('column') && error.message?.includes('does not exist')) {
+            const params2 = [...whereParams];
+            let q2 = `SELECT * FROM job_status_view WHERE 1=1${fragment} ORDER BY job_id DESC`;
+            if (limitValue) {
+                q2 += ` LIMIT $${params2.length + 1}`;
+                params2.push(limitValue);
+            }
+            result = await client.query(q2, params2);
+        } else {
+            throw error;
+        }
+    }
+
+    const runlistMap = await batchResolveRunlistIds(client, result.rows);
+
+    const seenJobIds = new Set<string>();
+    const uniqueRows = result.rows.filter((row) => {
+        if (seenJobIds.has(row.job_id)) return false;
+        seenJobIds.add(row.job_id);
+        return true;
+    });
+
+    const jobsWithRunlist: any[] = [];
+    for (const row of uniqueRows) {
+        const runlistIds = runlistMap.get(row.job_id) ?? [];
+        const baseJob = {
+            job_id: row.job_id,
+            total_versions: parseInt(row.total_versions, 10) || 0,
+            completed_versions: parseInt(row.completed_versions, 10) || 0,
+            version_tags: row.version_tags || [],
+            status: row.status || 'print_ready',
+            latest_completed_operation_id: row.latest_completed_operation_id || null,
+            created_at: row.earliest_completed_at || null,
+            updated_at: row.latest_completed_at || null,
+        };
+        if (runlistIds.length === 0) {
+            jobsWithRunlist.push({ ...baseJob, runlist_id: null });
+        } else {
+            for (const runlistId of runlistIds) {
+                jobsWithRunlist.push({ ...baseJob, runlist_id: runlistId });
+            }
+        }
+    }
+    return jobsWithRunlist;
+}
+
+// Get all jobs from job_status_runlist_view (primary app DB), or legacy path if view missing
+export async function getJobs(filters?: JobFilterOptions): Promise<any[]> {
+    const excludeFinished = Array.isArray(filters?.excludeStatus)
+        ? filters!.excludeStatus!.includes('production_finished')
+        : filters?.excludeStatus === 'production_finished';
+    const onlyFinished = filters?.status === 'production_finished';
+    const limitValue = filters?.limit && filters.limit > 0 ? filters.limit : null;
+    const { fragment, params: whereParams } = buildJobStatusViewWhere(filters, excludeFinished, onlyFinished);
+
+    const client = await appPool.connect();
+    try {
+        try {
+            return await queryJobStatusRunlistView(client, fragment, whereParams, limitValue);
+        } catch (error: any) {
+            const msg = String(error?.message || '');
+            const missingRunlistView =
+                error?.code === '42P01' ||
+                (msg.includes('job_status_runlist_view') && msg.includes('does not exist'));
+            if (missingRunlistView) {
+                console.warn(
+                    'job_status_runlist_view not found; using job_status_view + batched runlist resolution. Run migration 016.'
+                );
+                return await getJobsUsingStatusViewAndBatch(
+                    client,
+                    filters,
+                    excludeFinished,
+                    onlyFinished,
+                    limitValue
+                );
+            }
+            throw error;
+        }
+    } catch (error: any) {
         if (error.message.includes('does not exist') || error.message.includes('relation') || error.message.includes('view')) {
             console.warn('job_status_view not found, falling back to direct query. Run migration 002-create-job-status-view.sql');
             return getJobsFallback(filters);
@@ -476,7 +692,7 @@ export async function getJobs(filters?: JobFilterOptions): Promise<any[]> {
 
 // Fallback function if view doesn't exist (original implementation)
 async function getJobsFallback(filters?: JobFilterOptions): Promise<any[]> {
-    const client = await pool.connect();
+    const client = await appPool.connect();
     try {
         let query = `
             SELECT 
@@ -494,19 +710,31 @@ async function getJobsFallback(filters?: JobFilterOptions): Promise<any[]> {
         const params: any[] = [];
         let paramIndex = 1;
 
-        if (filters?.dateFrom) {
-            query += ` AND jo.completed_at >= $${paramIndex}`;
-            params.push(filters.dateFrom);
+        const hasDateFrom = Boolean(filters?.dateFrom);
+        const hasDateTo = Boolean(filters?.dateTo);
+        if (hasDateFrom) {
+            params.push(filters!.dateFrom);
             paramIndex++;
         }
-
-        if (filters?.dateTo) {
-            query += ` AND jo.completed_at <= $${paramIndex}`;
-            params.push(filters.dateTo);
+        if (hasDateTo) {
+            params.push(filters!.dateTo);
             paramIndex++;
         }
 
         query += ` GROUP BY jo.job_id`;
+
+        if (hasDateFrom || hasDateTo) {
+            let hi = 1;
+            query += ` HAVING`;
+            const parts: string[] = [];
+            if (hasDateFrom) {
+                parts.push(`MAX(jo.completed_at) >= $${hi++}`);
+            }
+            if (hasDateTo) {
+                parts.push(`MAX(jo.completed_at) <= $${hi++}`);
+            }
+            query += ` ${parts.join(' AND ')}`;
+        }
 
         let result;
         const limitValue = filters?.limit && filters.limit > 0 ? filters.limit : null;
@@ -632,7 +860,17 @@ async function getJobsFallback(filters?: JobFilterOptions): Promise<any[]> {
                 runlist_id: runlistId,
             };
         }));
-        
+
+        const excludeFinished = Array.isArray(filters?.excludeStatus)
+            ? filters.excludeStatus.includes('production_finished')
+            : filters?.excludeStatus === 'production_finished';
+        const onlyFinished = filters?.status === 'production_finished';
+        if (onlyFinished) {
+            return jobsWithRunlist.filter((j: any) => j.status === 'production_finished');
+        }
+        if (excludeFinished) {
+            return jobsWithRunlist.filter((j: any) => j.status !== 'production_finished');
+        }
         return jobsWithRunlist;
     } finally {
         client.release();

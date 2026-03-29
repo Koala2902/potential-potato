@@ -1,14 +1,5 @@
 export type JobStatus = 'pending' | 'started' | 'completed';
 
-// Job Status Categories for JobStatusPage
-export type JobStatusCategory = 'print_ready' | 'printed' | 'digital_cut' | 'slitter' | 'production_finished';
-
-// Group by rules
-export type GroupByRule = 'material' | 'finishing' | 'material_finishing' | 'runlist';
-
-// Sort by rules
-export type SortByRule = 'due_date' | 'created_at' | 'job_code';
-
 // Job operations status
 export interface JobOperations {
   print?: boolean;
@@ -35,17 +26,15 @@ export interface Job {
   createdAt: string;
   startedAt?: string;
   completedAt?: string;
-  // Extended fields for JobStatusPage
   material?: string;
   finishing?: string;
   operations?: JobOperations;
-  // Grouped job fields (from job_operations)
   totalVersions?: number;
   completedVersions?: number;
   versionTags?: string[];
-  currentStatus?: string; // 'print_ready' | 'printed' | 'digital_cut' | 'slitter' | 'production_finished'
+  currentStatus?: string;
   maxCompletedSequence?: number;
-  runlistId?: string | null; // Runlist ID for grouping
+  runlistId?: string | null;
 }
 
 export interface Roll {
@@ -84,19 +73,6 @@ export interface Machine {
   availability_status?: string;
 }
 
-export interface ScheduledJob {
-  id: string;
-  jobId: string;
-  jobCode: string;
-  machineId: string;
-  startTime: string; // ISO datetime
-  endTime: string; // ISO datetime
-  status: JobStatus;
-  orderId: string;
-  ticketId: string;
-  qty: number;
-}
-
 export interface ProductionQueueItem {
   runlist_id: string;
   imposition_count: number;
@@ -114,21 +90,4 @@ export interface ImpositionDetails {
     file_ids?: string[];
     file_id?: string; // Keep for backward compatibility
     [key: string]: any;
-}
-
-// JobStatusCard configuration
-export interface JobStatusCardConfig {
-  status: JobStatusCategory;
-  filterRule: (job: Job) => boolean;
-  groupBy: GroupByRule;
-  sortBy: SortByRule;
-  title: string;
-  description: string;
-  icon: string; // Icon name for lucide-react
-}
-
-// Grouped jobs for display
-export interface GroupedJobs {
-  groupKey: string;
-  jobs: Job[];
 }

@@ -1,6 +1,6 @@
 import { Factory, CheckCircle2, Clock, Activity } from 'lucide-react';
 import { useState, useEffect } from 'react';
-import { fetchProductionStatus, fetchMachines, ProductionStatus, ProductionJob, Machine } from '../../services/api';
+import { fetchProductionStatus, fetchMachines, ProductionStatus, Machine } from '../../services/api';
 import './ProductionPage.css';
 
 export default function ProductionPage() {

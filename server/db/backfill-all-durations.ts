@@ -1,19 +1,7 @@
 import { processScannedCodes, processPrintOSRecords } from './status-updates.js';
-import { jobmanagerPool } from './jobmanager-connection.js';
-import pool from './connection.js';
-import pg from 'pg';
+import { appPool } from './app-connection.js';
+import logsPool from './connection.js';
 import dotenv from 'dotenv';
-
-const { Pool } = pg;
-
-// Create logs pool (same as in status-updates.ts)
-const logsPool = new Pool({
-    host: process.env.DB_HOST || 'localhost',
-    port: parseInt(process.env.DB_PORT || '5432'),
-    database: 'logs',
-    user: process.env.DB_USER || 'postgres',
-    password: process.env.DB_PASSWORD || 'postgres',
-});
 
 dotenv.config();
 
@@ -25,10 +13,9 @@ async function backfillAllDurations() {
     
     // Step 1: Reset processing markers to start from the beginning
     console.log('Step 1: Resetting processing markers...');
-    const jobmanagerClient = await jobmanagerPool.connect();
+    const appClient = await appPool.connect();
     try {
-        // Reset scanned_codes marker
-        await jobmanagerClient.query(`
+        await appClient.query(`
             INSERT INTO processing_markers (marker_type, last_processed_id, last_processed_at, updated_at)
             VALUES ('scanned_codes', 0, NOW(), NOW())
             ON CONFLICT (marker_type) DO UPDATE SET
@@ -38,8 +25,7 @@ async function backfillAllDurations() {
         `);
         console.log('  ✓ Reset scanned_codes marker to 0');
         
-        // Reset print_os marker
-        await jobmanagerClient.query(`
+        await appClient.query(`
             INSERT INTO processing_markers (marker_type, last_processed_id, last_processed_at, updated_at)
             VALUES ('print_os', 0, NOW(), NOW())
             ON CONFLICT (marker_type) DO UPDATE SET
@@ -49,7 +35,7 @@ async function backfillAllDurations() {
         `);
         console.log('  ✓ Reset print_os marker to 0\n');
     } finally {
-        jobmanagerClient.release();
+        appClient.release();
     }
     
     // Step 2: Process all Print OS records (for op001 durations)
@@ -69,7 +55,6 @@ async function backfillAllDurations() {
         
         console.log(`  Processed batch: ${result.processed} records, ${result.jobsUpdated} jobs updated`);
         
-        // If no records were processed, we're done
         if (result.processed === 0) {
             hasMorePrintOS = false;
         }
@@ -98,7 +83,6 @@ async function backfillAllDurations() {
         
         console.log(`  Processed batch: ${result.processed} scans, ${result.jobsUpdated} jobs updated`);
         
-        // If no scans were processed, we're done
         if (result.processed === 0) {
             hasMoreScans = false;
         }
@@ -112,10 +96,19 @@ async function backfillAllDurations() {
     
     // Step 4: Backfill durations for operations that might have been missed
     console.log('Step 4: Backfilling durations for completed operations...');
-    const logsClient = await logsPool.connect();
+    const appForOps = await appPool.connect();
+    const logsForDur = await logsPool.connect();
     try {
-        // Get all completed operations that don't have durations yet
-        const operations = await logsClient.query(`
+        const existingDur = await logsForDur.query(
+            `SELECT job_id, version_tag, operation_id FROM job_operation_duration`
+        );
+        const existingSet = new Set(
+            existingDur.rows.map(
+                (r) => `${r.job_id}|${r.version_tag}|${r.operation_id}`
+            )
+        );
+
+        const operations = await appForOps.query(`
             SELECT DISTINCT
                 jo.job_id,
                 jo.version_tag,
@@ -123,30 +116,29 @@ async function backfillAllDurations() {
                 jo.completed_at,
                 jo.completed_by
             FROM job_operations jo
-            LEFT JOIN job_operation_duration jod 
-                ON jo.job_id = jod.job_id 
-                AND jo.version_tag = jod.version_tag 
-                AND jo.operation_id = jod.operation_id
             WHERE jo.completed_at IS NOT NULL
             AND jo.status = 'completed'
-            AND jod.job_operation_duration_id IS NULL
             ORDER BY jo.completed_at DESC;
         `);
-        
-        console.log(`  Found ${operations.rows.length} operations without durations\n`);
+
+        const missing = operations.rows.filter(
+            (op) =>
+                !existingSet.has(
+                    `${op.job_id}|${op.version_tag}|${op.operation_id}`
+                )
+        );
+
+        console.log(`  Found ${missing.length} operations without durations\n`);
         
         let backfillSuccess = 0;
         let backfillSkipped = 0;
         let backfillErrors = 0;
         
-        for (const op of operations.rows) {
+        for (const op of missing) {
             try {
-                // Skip op001 - those should have been handled by Print OS processing
                 if (op.operation_id === 'op001') {
-                    // For op001, try to get duration from Print OS if completed_by is print_os
                     if (op.completed_by === 'print_os') {
-                        // Check if we can find Print OS record
-                        const printOSClient = await jobmanagerPool.connect();
+                        const printOSClient = await appPool.connect();
                         try {
                             const printOSResult = await printOSClient.query(`
                                 SELECT payload, job_complete_time
@@ -175,7 +167,7 @@ async function backfillAllDurations() {
                                     : null;
                                 
                                 if (durationSeconds !== null) {
-                                    await logsClient.query(`
+                                    await logsForDur.query(`
                                         INSERT INTO job_operation_duration (
                                             job_id, version_tag, operation_id, machine_id,
                                             operation_duration_seconds, operation_started_at, operation_completed_at, updated_at
@@ -206,14 +198,12 @@ async function backfillAllDurations() {
                     continue;
                 }
                 
-                // For non-op001 operations, calculate from scans
                 if (op.completed_by === 'scanner') {
-                    await logsClient.query(`
+                    await logsForDur.query(`
                         SELECT update_operation_duration($1, $2, $3);
                     `, [op.job_id, op.version_tag, op.operation_id]);
                     
-                    // Check if duration was calculated
-                    const check = await logsClient.query(`
+                    const check = await logsForDur.query(`
                         SELECT operation_duration_seconds
                         FROM job_operation_duration
                         WHERE job_id = $1 AND version_tag = $2 AND operation_id = $3;
@@ -241,10 +231,11 @@ async function backfillAllDurations() {
         console.log(`    - Errors: ${backfillErrors}\n`);
         
     } finally {
-        logsClient.release();
+        appForOps.release();
+        logsForDur.release();
     }
     
-    // Step 5: Summary statistics
+    // Step 5: Summary statistics (logs DB: job_operation_duration)
     console.log('Step 5: Final statistics...');
     const statsClient = await logsPool.connect();
     try {
@@ -281,7 +272,6 @@ backfillAllDurations().catch((error) => {
     console.error('Error during backfill:', error);
     process.exit(1);
 }).finally(async () => {
-    await jobmanagerPool.end();
+    await appPool.end();
     await logsPool.end();
 });
-

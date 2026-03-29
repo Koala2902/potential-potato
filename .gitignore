@@ -27,3 +27,13 @@ dist-ssr
 .env
 .env.local
 .env.*.local
+
+# Playwright
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+
+# Local CSV / one-off imports (keep out of git)
+*-Submissions.csv
+/Labex Submit Point - Submissions.csv

@@ -1,4 +1,5 @@
-import pool from './connection.js';
+import { appPool } from './app-connection.js';
+import { isUndefinedTableError } from './pg-errors.js';
 
 export interface ProductionQueueItem {
     runlist_id: string;
@@ -20,7 +21,7 @@ export interface ImpositionDetails {
 
 // Get production queue grouped by runlist_id
 export async function getProductionQueue(): Promise<ProductionQueueItem[]> {
-    const client = await pool.connect();
+    const client = await appPool.connect();
     try {
         // Query production_planner_paths table grouped by runlist_id
         // Only include rows where runlist_id is not NULL
@@ -84,6 +85,9 @@ export async function getProductionQueue(): Promise<ProductionQueueItem[]> {
         });
 
         return queue;
+    } catch (e) {
+        if (isUndefinedTableError(e)) return [];
+        throw e;
     } finally {
         client.release();
     }
@@ -91,7 +95,7 @@ export async function getProductionQueue(): Promise<ProductionQueueItem[]> {
 
 // Get imposition details including all file_ids from imposition_file_mapping
 export async function getImpositionDetails(impositionId: string): Promise<ImpositionDetails | null> {
-    const client = await pool.connect();
+    const client = await appPool.connect();
     try {
         // Get imposition configuration details including explanation
         const configResult = await client.query(
@@ -129,7 +133,7 @@ export async function getImpositionDetails(impositionId: string): Promise<Imposi
 
 // Get all file_ids for an imposition_id
 export async function getFileIds(impositionId: string): Promise<string[]> {
-    const client = await pool.connect();
+    const client = await appPool.connect();
     try {
         const result = await client.query(
             `
@@ -151,7 +155,7 @@ export async function getFileIds(impositionId: string): Promise<string[]> {
 // First checks if scan is a direct runlist_id (exact or partial match)
 // If not found, tries to parse as job_id_version_tag format
 export async function findRunlistByScan(scanInput: string): Promise<string | null> {
-    const client = await pool.connect();
+    const client = await appPool.connect();
     try {
         console.log(`[findRunlistByScan] Searching for runlist with scan: "${scanInput}"`);
         
@@ -240,7 +244,7 @@ export async function findRunlistByScan(scanInput: string): Promise<string | nul
 
 // Get production queue filtered by runlist_id
 export async function getProductionQueueByRunlist(runlistId: string): Promise<ProductionQueueItem[]> {
-    const client = await pool.connect();
+    const client = await appPool.connect();
     try {
         // Get impositions with sheet_width for sorting
         const result = await client.query(

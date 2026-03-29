@@ -1,13 +1,13 @@
 import { useState } from 'react';
 import Navigation from './components/Navigation/Navigation';
 import TicketPage from './pages/TicketPage/TicketPage';
-import SchedulePage from './pages/SchedulePage/SchedulePage';
 import ProductionPage from './pages/ProductionPage/ProductionPage';
-import JobStatusPage from './pages/JobStatusPage/JobStatusPage';
 import { Scan } from 'lucide-react';
+import SchedulerPage from './pages/SchedulerPage/SchedulerPage';
+import ConfigPage from './pages/ConfigPage/ConfigPage';
 import './App.css';
 
-type Page = 'operation' | 'schedule' | 'production' | 'jobstatus';
+type Page = 'operation' | 'production' | 'schedule' | 'config';
 
 function App() {
     const [currentPage, setCurrentPage] = useState<Page>('operation');
@@ -35,9 +35,9 @@ function App() {
 
             <main className="app-content">
                 {currentPage === 'operation' && <TicketPage />}
-                {currentPage === 'schedule' && <SchedulePage />}
                 {currentPage === 'production' && <ProductionPage />}
-                {currentPage === 'jobstatus' && <JobStatusPage />}
+                {currentPage === 'schedule' && <SchedulerPage />}
+                {currentPage === 'config' && <ConfigPage />}
             </main>
         </div>
     );

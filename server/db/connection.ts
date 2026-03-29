@@ -1,22 +1,20 @@
-import pg from 'pg';
-import dotenv from 'dotenv';
+import pg from "pg";
+import dotenv from "dotenv";
+
+import { getLogsDatabaseUrl } from "./database-config.js";
 
 dotenv.config();
 
 const { Pool } = pg;
 
-const pool = new Pool({
-    host: process.env.DB_HOST || '10.1.1.76',
-    port: parseInt(process.env.DB_PORT || '5432'),
-    database: process.env.DB_NAME || 'logs',
-    user: process.env.DB_USER || 'user',
-    password: process.env.DB_PASSWORD || 'password',
+/** Real-time pipeline DB: scanned_codes, job_operation_duration, duration helpers. */
+const logsPool = new Pool({
+  connectionString: getLogsDatabaseUrl(),
 });
 
-pool.on('error', (err) => {
-    console.error('Unexpected error on idle client', err);
-    process.exit(-1);
+logsPool.on("error", (err) => {
+  console.error("Unexpected error on idle logs DB client", err);
 });
 
-export default pool;
-
+export default logsPool;
+export { logsPool };

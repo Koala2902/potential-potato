@@ -1,8 +1,8 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import pool from './connection.js';
-import { jobmanagerPool } from './jobmanager-connection.js';
+import logsPool from './connection.js';
+import { appPool } from './app-connection.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -10,25 +10,24 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-async function runMigration(filePath: string, database: 'logs' | 'jobmanager'): Promise<void> {
+async function runMigration(filePath: string, database: 'logs' | 'app'): Promise<void> {
     const sql = fs.readFileSync(filePath, 'utf-8');
-    const client = database === 'logs' ? await pool.connect() : await jobmanagerPool.connect();
-    
+    const client =
+        database === 'logs' ? await logsPool.connect() : await appPool.connect();
+
     try {
         console.log(`\nRunning ${path.basename(filePath)} on ${database} database...`);
-        
-        // Split SQL by semicolons, but be careful with functions and other multi-statement blocks
-        // For now, just execute the entire SQL file
+
         await client.query(sql);
-        
+
         console.log(`✓ ${path.basename(filePath)} completed successfully`);
     } catch (error: any) {
-        // Some errors are expected (like "IF NOT EXISTS" clauses)
         const errorMsg = error.message || String(error);
-        
-        // Ignore "already exists" errors for IF NOT EXISTS clauses
-        if (errorMsg.includes('already exists') || 
-            errorMsg.includes('does not exist') && errorMsg.includes('DROP')) {
+
+        if (
+            errorMsg.includes('already exists') ||
+            (errorMsg.includes('does not exist') && errorMsg.includes('DROP'))
+        ) {
             console.log(`⚠ ${path.basename(filePath)}: ${errorMsg.split('\n')[0]}`);
         } else {
             console.error(`✗ ${path.basename(filePath)} failed:`, errorMsg);
@@ -41,106 +40,90 @@ async function runMigration(filePath: string, database: 'logs' | 'jobmanager'): 
 
 async function main() {
     const migrationsDir = path.join(__dirname, 'migrations');
-    
+
     console.log('Starting database migrations...\n');
-    
+
     try {
-        // Migration 001: Add tracking columns (runs on both databases)
         const migration001 = path.join(migrationsDir, '001-add-tracking-columns.sql');
         const sql001 = fs.readFileSync(migration001, 'utf-8');
-        
-        // Split migration 001 into logs and jobmanager parts
-        const sections = sql001.split('-- ============================================================================\n-- JOBMANAGER DATABASE');
-        const logsSection = sections[0].replace('-- ============================================================================\n-- LOGS DATABASE\n-- ============================================================================', '').trim();
-        const jobmanagerSection = sections[1] ? sections[1].replace('-- ============================================================================\n-- JOBMANAGER DATABASE\n-- ============================================================================', '').trim() : '';
-        
-        // Run logs section
-        const logsClient = await pool.connect();
+
+        const sections = sql001.split(
+            '-- ============================================================================\n-- JOBMANAGER DATABASE'
+        );
+        const appSection = sections[0]
+            .replace(
+                '-- ============================================================================\n-- LOGS DATABASE\n-- ============================================================================',
+                ''
+            )
+            .trim();
+        const secondSection = sections[1]
+            ? sections[1]
+                  .replace(
+                      '-- ============================================================================\n-- JOBMANAGER DATABASE\n-- ============================================================================',
+                      ''
+                  )
+                  .trim()
+            : '';
+
+        const appClient = await appPool.connect();
         try {
-            console.log('\nRunning 001-add-tracking-columns.sql (LOGS section)...');
-            await logsClient.query(logsSection);
-            console.log('✓ 001-add-tracking-columns.sql (LOGS section) completed');
+            console.log('\nRunning 001-add-tracking-columns.sql (app DB, section 1)...');
+            await appClient.query(appSection);
+            console.log('✓ 001 section 1 completed');
+            if (secondSection) {
+                console.log('\nRunning 001-add-tracking-columns.sql (app DB, section 2)...');
+                await appClient.query(secondSection);
+                console.log('✓ 001 section 2 completed');
+            }
         } catch (error: any) {
             const errorMsg = error.message || String(error);
-            if (!errorMsg.includes('already exists') && 
-                !(errorMsg.includes('does not exist') && errorMsg.includes('DROP'))) {
+            if (
+                !errorMsg.includes('already exists') &&
+                !(errorMsg.includes('does not exist') && errorMsg.includes('DROP'))
+            ) {
                 console.error('✗ Failed:', errorMsg);
                 throw error;
             } else {
                 console.log(`⚠ ${errorMsg.split('\n')[0]}`);
             }
         } finally {
-            logsClient.release();
+            appClient.release();
         }
-        
-        // Run jobmanager section
-        if (jobmanagerSection) {
-            const jobmanagerClient = await jobmanagerPool.connect();
-            try {
-                console.log('\nRunning 001-add-tracking-columns.sql (JOBMANAGER section)...');
-                await jobmanagerClient.query(jobmanagerSection);
-                console.log('✓ 001-add-tracking-columns.sql (JOBMANAGER section) completed');
-            } catch (error: any) {
-                const errorMsg = error.message || String(error);
-                if (!errorMsg.includes('already exists') && 
-                    !(errorMsg.includes('does not exist') && errorMsg.includes('DROP'))) {
-                    console.error('✗ Failed:', errorMsg);
-                    throw error;
-                } else {
-                    console.log(`⚠ ${errorMsg.split('\n')[0]}`);
-                }
-            } finally {
-                jobmanagerClient.release();
-            }
-        }
-        
-        // Migration 002: Create job_status_view (logs database only)
-        await runMigration(path.join(migrationsDir, '002-create-job-status-view.sql'), 'logs');
-        
-        // Migration 006: Migrate scanned_codes to logs (logs database only)
-        // Must run before 003 because 003 references scanned_codes table
+
+        await runMigration(path.join(migrationsDir, '002-create-job-status-view.sql'), 'app');
         await runMigration(path.join(migrationsDir, '006-migrate-scanned-codes-to-logs.sql'), 'logs');
-        
-        // Migration 003: Update job_status_view operation-based (logs database only)
-        // Runs after 006 because it references scanned_codes table
-        await runMigration(path.join(migrationsDir, '003-update-job-status-view-operation-based.sql'), 'logs');
-        
-        // Migration 007: Update view latest operation (logs database only)
-        await runMigration(path.join(migrationsDir, '007-update-view-latest-operation.sql'), 'logs');
-        
-        // Migration 009: Fix status function to check scanned_codes
-        await runMigration(path.join(migrationsDir, '009-fix-status-function-check-scanned-codes.sql'), 'logs');
-        
-        // Migration 010: Fix timestamp timezone
-        await runMigration(path.join(migrationsDir, '010-fix-timestamp-timezone.sql'), 'logs');
-        
-        // Migration 011: Update view with localized time
-        await runMigration(path.join(migrationsDir, '011-update-view-localized-time.sql'), 'logs');
-        
-        // Migration 012: Fix view operation priority
-        await runMigration(path.join(migrationsDir, '012-fix-view-operation-priority.sql'), 'logs');
-        
-        // Migration 013: Fix view compare local time
-        await runMigration(path.join(migrationsDir, '013-fix-view-compare-local-time.sql'), 'logs');
-        
-        // Migration 014: Remove operation sequence priority (use timestamp only)
-        await runMigration(path.join(migrationsDir, '014-remove-operation-sequence-priority.sql'), 'logs');
-        
-        // Migration 015: Add operation duration tracking (logs database only)
+        await runMigration(path.join(migrationsDir, '003-update-job-status-view-operation-based.sql'), 'app');
+        await runMigration(path.join(migrationsDir, '007-update-view-latest-operation.sql'), 'app');
+        await runMigration(path.join(migrationsDir, '009-fix-status-function-check-scanned-codes.sql'), 'app');
+        await runMigration(path.join(migrationsDir, '010-fix-timestamp-timezone.sql'), 'app');
+        await runMigration(path.join(migrationsDir, '011-update-view-localized-time.sql'), 'app');
+        await runMigration(path.join(migrationsDir, '012-fix-view-operation-priority.sql'), 'app');
+        await runMigration(path.join(migrationsDir, '013-fix-view-compare-local-time.sql'), 'app');
+        await runMigration(path.join(migrationsDir, '014-remove-operation-sequence-priority.sql'), 'app');
         await runMigration(path.join(migrationsDir, '015-add-operation-duration-tracking.sql'), 'logs');
-        
+        await runMigration(path.join(migrationsDir, '016-job-status-runlist-view.sql'), 'app');
+        await runMigration(path.join(migrationsDir, '018-job-status-view-performance.sql'), 'app');
+        await runMigration(path.join(migrationsDir, '019-drop-redundant-job-ops-index.sql'), 'app');
+        await runMigration(path.join(migrationsDir, '020-order-aggregate-printing-runlist-view.sql'), 'app');
+        await runMigration(path.join(migrationsDir, '021-machines-table-app.sql'), 'app');
+        await runMigration(path.join(migrationsDir, '022-machines-schema-match-jobmanager.sql'), 'app');
+        await runMigration(path.join(migrationsDir, '023-operations-table-app.sql'), 'app');
+        await runMigration(path.join(migrationsDir, '024-machine-modes.sql'), 'app');
+        await runMigration(
+            path.join(migrationsDir, '025-migrate-public-machines-operations-to-scheduler.sql'),
+            'app'
+        );
+
         console.log('\n=== Migration Summary ===');
         console.log('✓ All migrations completed successfully!');
         console.log('\nRun "npm run check-schema" to verify all schema elements are in place.');
-        
     } catch (error: any) {
         console.error('\n✗ Migration failed:', error.message);
         process.exit(1);
     } finally {
-        await pool.end();
-        await jobmanagerPool.end();
+        await logsPool.end();
+        await appPool.end();
     }
 }
 
 main();
-
