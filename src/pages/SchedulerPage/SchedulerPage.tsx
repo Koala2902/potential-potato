@@ -1,7 +1,11 @@
 import { formatInTimeZone } from "date-fns-tz";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { getJobCalendarMeta } from "../../lib/scheduler/job-calendar-date";
+import {
+  dateKeyToScheduledDateIso,
+  getJobCalendarMeta,
+  getScheduledDateForMachine,
+} from "../../lib/scheduler/job-calendar-date";
 import { getAppTimeZone } from "../../lib/scheduler/app-timezone";
 import {
   compareJobsByRoutingStep,
@@ -16,6 +20,7 @@ import {
   fetchSchedulerJobs,
   fetchSchedulerMachines,
   fetchSchedulerRouting,
+  patchSchedulerJobSchedule,
   type SchedulerJob,
 } from "../../services/api";
 import { CalendarGrid, monthNavParams } from "./CalendarGrid";
@@ -42,12 +47,13 @@ function parseMonthParam(s: string | undefined): { y: number; m: number } {
 
 function buildJobsByDayForJobs(
   jobList: SchedulerJob[],
+  machineId: string,
   estimatesByJobId: Map<string, number | null>
 ): Record<string, CalendarJobItem[]> {
   const map: Record<string, CalendarJobItem[]> = {};
   for (const job of jobList) {
     const meta = getJobCalendarMeta({
-      scheduledDate: job.scheduledDate,
+      scheduledDate: getScheduledDateForMachine(job.machineSchedules, machineId),
       dueDate: job.dueDate,
       createdAt: job.createdAt,
     });
@@ -72,6 +78,7 @@ function buildJobsByDayForJobs(
 export default function SchedulerPage() {
   const [jobs, setJobs] = useState<SchedulerJob[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [scheduleError, setScheduleError] = useState<string | null>(null);
   const [calendarMonth, setCalendarMonth] = useState<string>(() => {
     const tz = getAppTimeZone();
     return formatInTimeZone(new Date(), tz, "yyyy-MM");
@@ -95,6 +102,24 @@ export default function SchedulerPage() {
   const [routingRules, setRoutingRules] = useState<RoutingRule[]>([]);
   const [estimatesByJobId, setEstimatesByJobId] = useState<Map<string, number | null>>(
     () => new Map()
+  );
+
+  const onScheduleJobMove = useCallback(
+    async (jobId: string, dateKey: string) => {
+      if (!selectedMachineId) return;
+      setScheduleError(null);
+      try {
+        const iso = dateKeyToScheduledDateIso(dateKey);
+        await patchSchedulerJobSchedule(jobId, {
+          machineId: selectedMachineId,
+          scheduledDate: iso,
+        });
+        await loadJobs();
+      } catch (e) {
+        setScheduleError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [loadJobs, selectedMachineId]
   );
 
   const loadMachines = useCallback(async () => {
@@ -162,7 +187,7 @@ export default function SchedulerPage() {
         if (cancelled) return;
         const map = new Map<string, number | null>();
         for (const jb of result.jobBreakdowns) {
-          const step = jb.steps.find((s) => s.machineName === machine.name);
+          const step = jb.steps.find((s) => s.machineId === machine.id);
           map.set(jb.jobId, step != null ? step.minutes : null);
         }
         setEstimatesByJobId(map);
@@ -188,12 +213,15 @@ export default function SchedulerPage() {
     const sorted = [...filtered].sort((a, b) =>
       compareJobsByRoutingStep(a, b, selectedMachineId, routingRules)
     );
-    return buildJobsByDayForJobs(sorted, estimatesByJobId);
+    return buildJobsByDayForJobs(sorted, selectedMachineId, estimatesByJobId);
   }, [jobs, machines, selectedMachineId, routingRules, estimatesByJobId]);
 
   return (
     <div className="scheduler-page">
       {loadError && <div className="scheduler-banner scheduler-banner--error">{loadError}</div>}
+      {scheduleError && (
+        <div className="scheduler-banner scheduler-banner--error">{scheduleError}</div>
+      )}
       {machinesError && (
         <div className="scheduler-banner scheduler-banner--error">{machinesError}</div>
       )}
@@ -211,6 +239,7 @@ export default function SchedulerPage() {
           prevMonthParam={nav.prev}
           nextMonthParam={nav.next}
           onMonthChange={setCalendarMonth}
+          onScheduleJobMove={onScheduleJobMove}
         />
       </section>
     </div>

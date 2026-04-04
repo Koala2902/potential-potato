@@ -62,3 +62,12 @@ export function getAppDatabaseUrl(): string {
   const pass = process.env.APP_DB_PASSWORD ?? "";
   return `postgresql://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@${host}:${port}/${name}`;
 }
+
+/** True when logs and app use different connection strings (dual-DB mode). */
+export function isDedicatedLogsDatabase(): boolean {
+  try {
+    return getLogsDatabaseUrl() !== getAppDatabaseUrl();
+  } catch {
+    return false;
+  }
+}

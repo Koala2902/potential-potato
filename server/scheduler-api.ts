@@ -1,12 +1,12 @@
 import { Router } from "express";
 
 import { prisma } from "./db/prisma.js";
-import {
-  getSchedulerSyncDiagnostics,
-  migrateLegacySchedulerFromPublicIfNeeded,
-} from "./scheduler/legacy-migrate.js";
+import { getSchedulerSyncDiagnostics } from "./scheduler/legacy-migrate.js";
 import { estimate } from "./scheduler/estimator/engine.js";
-import { jobSwitchSchema } from "../src/lib/scheduler/validations/job.ts";
+import {
+  jobSwitchSchema,
+  patchJobScheduleSchema,
+} from "../src/lib/scheduler/validations/job.ts";
 import { Prisma } from "@prisma/client";
 import {
   createMachineSchema,
@@ -65,7 +65,6 @@ schedulerRouter.get("/config/diagnostics", async (_req, res) => {
 /** Machines + operations for scheduler config UI (includes disabled). */
 schedulerRouter.get("/config/machines", async (_req, res) => {
   try {
-    await migrateLegacySchedulerFromPublicIfNeeded();
     const machines = await prisma.machine.findMany({
       orderBy: { sortOrder: "asc" },
       include: {
@@ -412,6 +411,7 @@ schedulerRouter.get("/jobs", async (_req, res) => {
     const rows = await prisma.job.findMany({
       orderBy: { createdAt: "desc" },
       take: 500,
+      include: { machineSchedules: true },
     });
 
     const byKey = new Map<string, (typeof rows)[0]>();
@@ -444,6 +444,7 @@ schedulerRouter.post("/jobs", async (req, res) => {
 
     const d = parsed.data;
     const job = await prisma.job.create({
+      include: { machineSchedules: true },
       data: {
         source: "manual",
         pdfQty: d.pdfQty,
@@ -483,6 +484,55 @@ schedulerRouter.post("/jobs", async (req, res) => {
   }
 });
 
+schedulerRouter.patch("/jobs/:jobId", async (req, res) => {
+  try {
+    const { jobId } = req.params;
+    const parsed = patchJobScheduleSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.flatten() });
+      return;
+    }
+
+    const existing = await prisma.job.findUnique({ where: { id: jobId } });
+    if (!existing) {
+      res.status(404).json({ error: "Job not found" });
+      return;
+    }
+
+    const { machineId, scheduledDate } = parsed.data;
+    const machine = await prisma.machine.findUnique({ where: { id: machineId } });
+    if (!machine) {
+      res.status(400).json({ error: "Machine not found" });
+      return;
+    }
+
+    if (scheduledDate === null) {
+      await prisma.jobMachineSchedule.deleteMany({
+        where: { jobId, machineId },
+      });
+    } else {
+      const d = new Date(scheduledDate);
+      await prisma.jobMachineSchedule.upsert({
+        where: {
+          jobId_machineId: { jobId, machineId },
+        },
+        create: { jobId, machineId, scheduledDate: d },
+        update: { scheduledDate: d },
+      });
+    }
+
+    const job = await prisma.job.findUniqueOrThrow({
+      where: { id: jobId },
+      include: { machineSchedules: true },
+    });
+    res.json(job);
+  } catch (e) {
+    console.error("scheduler PATCH /jobs/:jobId:", e);
+    const detail = e instanceof Error ? e.message : String(e);
+    res.status(500).json({ error: "Failed to update job schedule", detail });
+  }
+});
+
 schedulerRouter.post("/estimate", async (req, res) => {
   try {
     const body = req.body as { jobIds?: string[] };
@@ -492,7 +542,6 @@ schedulerRouter.post("/estimate", async (req, res) => {
       return;
     }
 
-    await migrateLegacySchedulerFromPublicIfNeeded();
     const jobs = await prisma.job.findMany({ where: { id: { in: ids } } });
     const machines = await prisma.machine.findMany({
       orderBy: { sortOrder: "asc" },

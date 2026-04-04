@@ -1,7 +1,13 @@
 import { appPool } from './app-connection.js';
 import logsPool from './connection.js';
+import { isDedicatedLogsDatabase } from './database-config.js';
 import { isUndefinedTableError } from './pg-errors.js';
 import { prisma } from './prisma.js';
+
+/** job_operations + job_status_* views: logs pool when LOGS_DATABASE_URL ≠ DATABASE_URL. */
+function poolForJobPipelineViews(): typeof appPool {
+    return isDedicatedLogsDatabase() ? logsPool : appPool;
+}
 
 /**
  * Scan pipeline contract: `scanned_codes.operations` JSONB uses `{ "operations": ["op001", ...] }`
@@ -462,8 +468,11 @@ const RUNLIST_BATCH_SIZE = 80;
  * Returns Map<job_id, runlist_id[]>. Searches all version_tags per job. */
 async function batchResolveRunlistIds(
     client: import('pg').PoolClient,
-    rows: { job_id: string; version_tags?: string[] }[]
+    rows: { job_id: string; version_tags?: string[] }[],
+    /** imposition_file_mapping + production_planner_paths (app DB when dual-DB). */
+    plannerClient?: import('pg').PoolClient
 ): Promise<Map<string, string[]>> {
+    const planner = plannerClient ?? client;
     const patterns: { pattern: string; job_id: string }[] = [];
     for (const row of rows) {
         const versionTags = row.version_tags || [];
@@ -483,7 +492,7 @@ async function batchResolveRunlistIds(
         const orClauses = chunk.map((_, idx) => `ifm.file_id LIKE $${idx + 1}`).join(' OR ');
         const params = chunk.map((p) => p.pattern);
         try {
-            const runlistResult = await client.query(
+            const runlistResult = await planner.query(
                 `SELECT DISTINCT ifm.file_id, ppp.runlist_id
                  FROM imposition_file_mapping ifm
                  INNER JOIN production_planner_paths ppp ON ifm.imposition_id = ppp.imposition_id
@@ -584,6 +593,7 @@ async function queryJobStatusRunlistView(
 /** Fallback when migration 016 is not applied: job_status_view + batched LIKE runlist resolution. */
 async function getJobsUsingStatusViewAndBatch(
     client: import('pg').PoolClient,
+    plannerClient: import('pg').PoolClient,
     filters: JobFilterOptions | undefined,
     excludeFinished: boolean,
     onlyFinished: boolean,
@@ -614,7 +624,7 @@ async function getJobsUsingStatusViewAndBatch(
         }
     }
 
-    const runlistMap = await batchResolveRunlistIds(client, result.rows);
+    const runlistMap = await batchResolveRunlistIds(client, result.rows, plannerClient);
 
     const seenJobIds = new Set<string>();
     const uniqueRows = result.rows.filter((row) => {
@@ -647,7 +657,7 @@ async function getJobsUsingStatusViewAndBatch(
     return jobsWithRunlist;
 }
 
-// Get all jobs from job_status_runlist_view (primary app DB), or legacy path if view missing
+// Get all jobs from job_status_runlist_view (pipeline DB), or legacy path if view missing
 export async function getJobs(filters?: JobFilterOptions): Promise<any[]> {
     const excludeFinished = Array.isArray(filters?.excludeStatus)
         ? filters!.excludeStatus!.includes('production_finished')
@@ -656,7 +666,9 @@ export async function getJobs(filters?: JobFilterOptions): Promise<any[]> {
     const limitValue = filters?.limit && filters.limit > 0 ? filters.limit : null;
     const { fragment, params: whereParams } = buildJobStatusViewWhere(filters, excludeFinished, onlyFinished);
 
-    const client = await appPool.connect();
+    const viewPool = poolForJobPipelineViews();
+    const client = await viewPool.connect();
+    const plannerClient = isDedicatedLogsDatabase() ? await appPool.connect() : client;
     try {
         try {
             return await queryJobStatusRunlistView(client, fragment, whereParams, limitValue);
@@ -671,6 +683,7 @@ export async function getJobs(filters?: JobFilterOptions): Promise<any[]> {
                 );
                 return await getJobsUsingStatusViewAndBatch(
                     client,
+                    plannerClient,
                     filters,
                     excludeFinished,
                     onlyFinished,
@@ -687,12 +700,16 @@ export async function getJobs(filters?: JobFilterOptions): Promise<any[]> {
         throw error;
     } finally {
         client.release();
+        if (plannerClient !== client) {
+            plannerClient.release();
+        }
     }
 }
 
 // Fallback function if view doesn't exist (original implementation)
 async function getJobsFallback(filters?: JobFilterOptions): Promise<any[]> {
-    const client = await appPool.connect();
+    const client = await poolForJobPipelineViews().connect();
+    const plannerClient = isDedicatedLogsDatabase() ? await appPool.connect() : client;
     try {
         let query = `
             SELECT 
@@ -830,7 +847,7 @@ async function getJobsFallback(filters?: JobFilterOptions): Promise<any[]> {
                     const versionTag = versionTags[0];
                     const pattern = `FILE_${versionTag}_Labex_${row.job_id}_%`;
                     
-                    const runlistResult = await client.query(
+                    const runlistResult = await plannerClient.query(
                         `SELECT DISTINCT ppp.runlist_id
                          FROM imposition_file_mapping ifm
                          INNER JOIN production_planner_paths ppp ON ifm.imposition_id = ppp.imposition_id
@@ -874,6 +891,9 @@ async function getJobsFallback(filters?: JobFilterOptions): Promise<any[]> {
         return jobsWithRunlist;
     } finally {
         client.release();
+        if (plannerClient !== client) {
+            plannerClient.release();
+        }
     }
 }
 

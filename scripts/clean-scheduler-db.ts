@@ -22,6 +22,7 @@ async function main() {
   const wantSeed = process.argv.includes("--seed");
 
   const counts = await prisma.$transaction(async (tx) => {
+    const jms = await tx.jobMachineSchedule.deleteMany();
     const j = await tx.job.deleteMany();
     const od = await tx.operationDependency.deleteMany();
     const mo = await tx.materialOverride.deleteMany();
@@ -32,6 +33,7 @@ async function main() {
     const c = await tx.connector.deleteMany();
     const tes = await tx.timeEstimatorSettings.deleteMany();
     return {
+      jobMachineSchedule: jms.count,
       job: j.count,
       operationDependency: od.count,
       materialOverride: mo.count,

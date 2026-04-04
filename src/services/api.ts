@@ -190,13 +190,21 @@ export async function fetchJobs(filters?: JobFilterOptions): Promise<any[]> {
     return response.json();
 }
 
+/** Per-machine calendar row from `scheduler.JobMachineSchedule`. */
+export interface JobMachineScheduleRow {
+    id: string;
+    jobId: string;
+    machineId: string;
+    scheduledDate: string;
+}
+
 /** Scheduler (Prisma) jobs — distinct from `/api/jobs` scan/status jobs. */
 export interface SchedulerJob {
     id: string;
     source: string;
     connectorId: string | null;
     externalId: string | null;
-    scheduledDate: string | null;
+    machineSchedules: JobMachineScheduleRow[];
     createdAt: string;
     pdfQty: number;
     material: string;
@@ -212,8 +220,6 @@ export interface SchedulerJob {
     labelHeightMm: number | null;
     labelGapMm: number | null;
     labelsAcross: number | null;
-    labelOuterWidthMm: number | null;
-    labelSizeId: string | null;
     overlaminateFilm: string | null;
     rollLengthMetres: number | null;
     forClient: boolean | null;
@@ -241,6 +247,7 @@ export interface TimeEstimatorSettingsRow {
 }
 
 export interface SchedulerEstimateJobStep {
+    machineId: string;
     machineName: string;
     machineDisplayName: string;
     effectiveSpeedMpm: number | null;
@@ -284,6 +291,26 @@ export async function fetchSchedulerJobs(): Promise<SchedulerJob[]> {
         throw new Error(
             `Failed to fetch scheduler jobs (${response.status})${server ? `: ${server}` : ''}`
         );
+    }
+    return response.json();
+}
+
+export async function patchSchedulerJobSchedule(
+    jobId: string,
+    body: { machineId: string; scheduledDate: string | null }
+): Promise<SchedulerJob> {
+    const response = await fetch(`${API_BASE_URL}/scheduler/jobs/${jobId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+        const j = (await response.json().catch(() => ({}))) as { error?: unknown; detail?: unknown };
+        const msg =
+            (typeof j.detail === 'string' && j.detail) ||
+            (typeof j.error === 'string' && j.error) ||
+            response.statusText;
+        throw new Error(msg || 'Failed to update job schedule');
     }
     return response.json();
 }

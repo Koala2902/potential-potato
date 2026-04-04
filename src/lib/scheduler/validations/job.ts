@@ -65,3 +65,11 @@ export const jobSwitchSchema = z
   });
 
 export type JobSwitchInput = z.infer<typeof jobSwitchSchema>;
+
+/** PATCH /scheduler/jobs/:id — set calendar schedule for one machine (upsert; null clears). */
+export const patchJobScheduleSchema = z.object({
+  machineId: z.string().uuid(),
+  scheduledDate: z.union([z.string().datetime({ offset: true }), z.null()]),
+});
+
+export type PatchJobScheduleInput = z.infer<typeof patchJobScheduleSchema>;

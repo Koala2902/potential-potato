@@ -19,13 +19,6 @@ export default function ProductionQueueList({
 }: ProductionQueueListProps) {
     return (
         <div className="production-queue-list">
-            <div className="queue-header">
-                <h2 className="gradient-text">Production Queue</h2>
-                <div className="queue-count">
-                    {queue.reduce((sum, item) => sum + item.imposition_count, 0)} jobs
-                </div>
-            </div>
-
             <div className="queue-content">
                 {queue.length === 0 ? (
                     <div className="empty-queue">

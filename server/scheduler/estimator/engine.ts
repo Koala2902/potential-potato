@@ -72,6 +72,7 @@ export function estimate(input: EstimateInput): EstimateResult {
       routingRuleId: est.routingRuleId,
       minutes: est.minutes,
       steps: est.stepDetails.map((s) => ({
+        machineId: s.machineId,
         machineName: s.machineName,
         machineDisplayName: s.machineDisplayName,
         effectiveSpeedMpm: s.effectiveSpeedMpm,

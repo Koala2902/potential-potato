@@ -37,6 +37,35 @@ test.describe("Schedule UI → database", () => {
     expect(row?.pdfQty).toBe(1000);
   });
 
+  test("PATCH job schedule: per-machine row in JobMachineSchedule", async ({ request }) => {
+    const machinesRes = await request.get("/api/scheduler/config/machines");
+    expect(machinesRes.ok()).toBeTruthy();
+    const machines = (await machinesRes.json()) as Array<{ id: string }>;
+    expect(machines.length).toBeGreaterThan(0);
+    const machineId = machines[0].id;
+
+    const substrate = `e2e_patch_${Date.now()}`;
+    const material = compositeMaterialPrintColour(substrate, "cmyk");
+
+    const postRes = await request.post("/api/scheduler/jobs", {
+      data: { ...minimalJobBody, material: substrate },
+    });
+    expect(postRes.ok()).toBeTruthy();
+    const job = (await postRes.json()) as { id: string };
+
+    const iso = new Date("2026-04-15T12:00:00.000Z").toISOString();
+    const patchRes = await request.patch(`/api/scheduler/jobs/${job.id}`, {
+      data: { machineId, scheduledDate: iso },
+    });
+    expect(patchRes.ok()).toBeTruthy();
+
+    const row = await prisma.jobMachineSchedule.findFirst({
+      where: { jobId: job.id, machineId },
+    });
+    expect(row).not.toBeNull();
+    expect(row?.scheduledDate.toISOString()).toBe(iso);
+  });
+
   test("Config: new machine persists to scheduler.Machine", async ({ page, request }) => {
     const name = `e2e_m_${Date.now()}`;
     const displayName = "E2E Machine";

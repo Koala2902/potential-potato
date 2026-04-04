@@ -1,5 +1,5 @@
 import { formatInTimeZone, fromZonedTime } from "date-fns-tz";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 
 import { getAppTimeZone } from "../../lib/scheduler/app-timezone";
 import { formatProductionTimeShort } from "../../lib/scheduler/format-production-time";
@@ -7,6 +7,8 @@ import { productionPathForMachineName } from "../../lib/scheduler/machine-produc
 import type { CalendarJobItem } from "./types";
 
 const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] as const;
+
+const DRAG_JOB_MIME = "application/x-scheduler-job-id";
 
 /** Visible material snippet in a day cell (full text on hover via `title`). */
 const MATERIAL_PILL_MAX = 14;
@@ -74,10 +76,20 @@ type MonthGridProps = {
   year: number;
   month: number;
   jobsByDay: Record<string, CalendarJobItem[]>;
+  /** When set, job pills are draggable and days accept drops (updates per-machine schedule). */
+  onScheduleJobMove?: (jobId: string, dateKey: string) => void | Promise<void>;
 };
 
-function CalendarMonthGrid({ year, month, jobsByDay }: MonthGridProps) {
+function CalendarMonthGrid({
+  year,
+  month,
+  jobsByDay,
+  onScheduleJobMove,
+}: MonthGridProps) {
   const tz = getAppTimeZone();
+  const [dropTargetKey, setDropTargetKey] = useState<string | null>(null);
+  const [draggingJobId, setDraggingJobId] = useState<string | null>(null);
+  const canDrag = Boolean(onScheduleJobMove);
   const dim = daysInMonth(year, month);
   const anchor = fromZonedTime(
     `${year}-${String(month).padStart(2, "0")}-01T12:00:00`,
@@ -126,7 +138,38 @@ function CalendarMonthGrid({ year, month, jobsByDay }: MonthGridProps) {
                 key={key}
                 className={
                   "scheduler-cal__cell scheduler-cal__cell--day" +
-                  (isToday ? " scheduler-cal__cell--today" : "")
+                  (isToday ? " scheduler-cal__cell--today" : "") +
+                  (canDrag && dropTargetKey === dateKey ? " scheduler-cal__cell--drop-target" : "")
+                }
+                onDragOver={
+                  canDrag
+                    ? (e) => {
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = "move";
+                        setDropTargetKey(dateKey);
+                      }
+                    : undefined
+                }
+                onDragLeave={
+                  canDrag
+                    ? (e) => {
+                        if (e.currentTarget.contains(e.relatedTarget as Node)) return;
+                        setDropTargetKey((k) => (k === dateKey ? null : k));
+                      }
+                    : undefined
+                }
+                onDrop={
+                  canDrag
+                    ? (e) => {
+                        e.preventDefault();
+                        setDropTargetKey(null);
+                        setDraggingJobId(null);
+                        const id =
+                          e.dataTransfer.getData(DRAG_JOB_MIME) ||
+                          e.dataTransfer.getData("text/plain");
+                        if (id && onScheduleJobMove) void onScheduleJobMove(id, dateKey);
+                      }
+                    : undefined
                 }
               >
                 <span
@@ -142,7 +185,29 @@ function CalendarMonthGrid({ year, month, jobsByDay }: MonthGridProps) {
                     <li
                       key={j.id}
                       title={calendarJobTooltip(j)}
-                      className="scheduler-cal__jobpill"
+                      draggable={canDrag}
+                      className={
+                        "scheduler-cal__jobpill" +
+                        (draggingJobId === j.id ? " scheduler-cal__jobpill--dragging" : "")
+                      }
+                      onDragStart={
+                        canDrag
+                          ? (e) => {
+                              setDraggingJobId(j.id);
+                              e.dataTransfer.setData(DRAG_JOB_MIME, j.id);
+                              e.dataTransfer.setData("text/plain", j.id);
+                              e.dataTransfer.effectAllowed = "move";
+                            }
+                          : undefined
+                      }
+                      onDragEnd={
+                        canDrag
+                          ? () => {
+                              setDraggingJobId(null);
+                              setDropTargetKey(null);
+                            }
+                          : undefined
+                      }
                     >
                       <span className="scheduler-cal__jobtime">
                         {formatProductionTimeShort(j.estimatedMinutesForMachine)}
@@ -174,6 +239,7 @@ type Props = {
   prevMonthParam: string;
   nextMonthParam: string;
   onMonthChange: (yyyyMm: string) => void;
+  onScheduleJobMove?: (jobId: string, dateKey: string) => void | Promise<void>;
 };
 
 export function CalendarGrid({
@@ -188,6 +254,7 @@ export function CalendarGrid({
   prevMonthParam,
   nextMonthParam,
   onMonthChange,
+  onScheduleJobMove,
 }: Props) {
   const tz = getAppTimeZone();
   const anchor = fromZonedTime(
@@ -271,14 +338,20 @@ export function CalendarGrid({
 
       {machines.length > 0 && selectedMachineId && (
         <div className="scheduler-cal__single-wrap" data-testid="scheduler-calendar-machines">
-          <CalendarMonthGrid year={year} month={month} jobsByDay={jobsByDay} />
+          <CalendarMonthGrid
+            year={year}
+            month={month}
+            jobsByDay={jobsByDay}
+            onScheduleJobMove={onScheduleJobMove}
+          />
         </div>
       )}
 
       <p className="scheduler-cal__footnote">
         Each job appears on its <strong>scheduled</strong> date if set, otherwise{" "}
         <strong>due</strong>, otherwise <strong>created</strong> (in {tz}). Labels use the PDF file
-        name when available; otherwise the material key (hover for full detail).
+        name when available; otherwise the material key (hover for full detail). Drag a job to
+        another day to set its <strong>scheduled</strong> date.
       </p>
     </div>
   );

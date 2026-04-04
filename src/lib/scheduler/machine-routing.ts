@@ -165,6 +165,8 @@ export function resolveStepOperationIds(
 }
 
 export type StepEstimate = {
+  /** Stable join key for UI (matches `scheduler.Machine.id`). */
+  machineId: string;
   machineDisplayName: string;
   machineName: string;
   effectiveSpeedMpm: number | null;
@@ -180,6 +182,7 @@ export function estimateMinutesForMachineStep(
   const { operationIds, source } = resolveStepOperationIds(machine, step);
   if (source === "none" || operationIds.length === 0) {
     return {
+      machineId: machine.id,
       machineDisplayName: machine.displayName,
       machineName: machine.name,
       effectiveSpeedMpm: null,
@@ -193,6 +196,7 @@ export function estimateMinutesForMachineStep(
   const speed = effectiveSpeedMpmForOperationIds(machine.operations, operationIds);
   if (speed == null || speed <= 0) {
     return {
+      machineId: machine.id,
       machineDisplayName: machine.displayName,
       machineName: machine.name,
       effectiveSpeedMpm: null,
@@ -204,6 +208,7 @@ export function estimateMinutesForMachineStep(
   const len = rollLengthMetres != null && rollLengthMetres > 0 ? rollLengthMetres : 0;
   if (len <= 0) {
     return {
+      machineId: machine.id,
       machineDisplayName: machine.displayName,
       machineName: machine.name,
       effectiveSpeedMpm: speed,
@@ -214,6 +219,7 @@ export function estimateMinutesForMachineStep(
 
   const runMinutes = len / speed;
   return {
+    machineId: machine.id,
     machineDisplayName: machine.displayName,
     machineName: machine.name,
     effectiveSpeedMpm: speed,
@@ -245,6 +251,7 @@ export function estimateJobRouteMinutes(
     const machine = machinesById.get(step.machineId);
     if (!machine) {
       stepDetails.push({
+        machineId: step.machineId,
         machineDisplayName: step.machineId,
         machineName: step.machineId,
         effectiveSpeedMpm: null,

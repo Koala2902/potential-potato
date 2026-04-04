@@ -6,31 +6,11 @@
     border-right: 1px solid var(--border-color);
 }
 
-.queue-header {
-    padding: var(--spacing-lg);
-    border-bottom: 1px solid var(--border-color);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    background: var(--bg-tertiary);
-}
-
-.queue-header h2 {
-    font-size: 1.25rem;
-    font-weight: 700;
-    margin: 0;
-}
-
-.queue-count {
-    font-size: 0.875rem;
-    color: var(--text-secondary);
-    font-weight: 500;
-}
-
 .queue-content {
     flex: 1;
     overflow-y: auto;
     padding: var(--spacing-md);
+    min-height: 0;
 }
 
 .empty-queue {
@@ -102,6 +82,8 @@
 .impositions-list {
     border-top: 1px solid var(--border-color);
     padding: var(--spacing-xs);
+    max-height: min(42vh, 280px);
+    overflow-y: auto;
 }
 
 .imposition-item {

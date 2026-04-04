@@ -1,4 +1,4 @@
-import { formatInTimeZone } from "date-fns-tz";
+import { formatInTimeZone, fromZonedTime } from "date-fns-tz";
 
 import { getAppTimeZone } from "./app-timezone";
 
@@ -31,4 +31,18 @@ export function getJobCalendarMeta(job: JobCalendarFields): {
     dateKey: formatInTimeZone(new Date(job.createdAt), tz, "yyyy-MM-dd"),
     basis: "created",
   };
+}
+
+export function getScheduledDateForMachine(
+    machineSchedules: Array<{ machineId: string; scheduledDate: string }> | undefined,
+    machineId: string
+): string | null {
+    const row = machineSchedules?.find((s) => s.machineId === machineId);
+    return row?.scheduledDate ?? null;
+}
+
+/** Calendar day `yyyy-MM-dd` → UTC ISO stored on `JobMachineSchedule.scheduledDate` (noon in app zone). */
+export function dateKeyToScheduledDateIso(dateKey: string): string {
+  const tz = getAppTimeZone();
+  return fromZonedTime(`${dateKey}T12:00:00`, tz).toISOString();
 }

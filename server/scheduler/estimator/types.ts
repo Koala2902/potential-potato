@@ -6,6 +6,7 @@ export type OperationWithRules = Operation & {
 };
 
 export type JobEstimateStep = {
+  machineId: string;
   machineName: string;
   machineDisplayName: string;
   effectiveSpeedMpm: number | null;

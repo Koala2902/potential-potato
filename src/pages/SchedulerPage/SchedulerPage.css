@@ -485,6 +485,11 @@
   box-shadow: inset 0 0 0 1px rgba(245, 158, 11, 0.45);
 }
 
+.scheduler-cal__cell--drop-target {
+  box-shadow: inset 0 0 0 2px rgba(34, 197, 94, 0.55);
+  background: rgba(34, 197, 94, 0.07);
+}
+
 .scheduler-cal__daynum {
   font-size: 0.7rem;
   font-weight: 500;
@@ -518,6 +523,14 @@
   font-size: 0.62rem;
   line-height: 1.2;
   color: var(--text-primary);
+}
+
+.scheduler-cal__jobpill[draggable="true"] {
+  cursor: grab;
+}
+
+.scheduler-cal__jobpill--dragging {
+  opacity: 0.55;
 }
 
 @media (min-width: 640px) {

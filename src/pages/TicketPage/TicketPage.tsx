@@ -11,6 +11,7 @@ import {
     Machine,
 } from '../../services/api';
 import { Settings, ChevronDown, AlertCircle, X, Package, Hash, FileText } from 'lucide-react';
+import './TicketPage.css';
 
 export default function TicketPage() {
     const [queue, setQueue] = useState<ProductionQueueItem[]>([]);
@@ -30,6 +31,7 @@ export default function TicketPage() {
     const [selectedMachine, setSelectedMachine] = useState<Machine | null>(null);
     const [showSettings, setShowSettings] = useState(true);
     const [notification, setNotification] = useState<{ message: string; type: 'error' | 'success' } | null>(null);
+    const [manualScan, setManualScan] = useState('');
 
     const loadProductionQueue = async () => {
         try {
@@ -65,9 +67,9 @@ export default function TicketPage() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
-    const processScanValue = useCallback(async (scanValue: string) => {
+    const processScanValue = useCallback(async (scanValue: string): Promise<boolean> => {
         if (!scanValue.trim() || isScanning) {
-            return;
+            return false;
         }
 
         if (!selectedMachineId.trim()) {
@@ -75,7 +77,7 @@ export default function TicketPage() {
                 message: 'Select a machine before scanning',
                 type: 'error',
             });
-            return;
+            return false;
         }
 
         try {
@@ -110,6 +112,7 @@ export default function TicketPage() {
             }
 
             scanBufferRef.current = '';
+            return true;
         } catch (err) {
             const errorMessage = err instanceof Error ? err.message : 'Failed to process scan';
 
@@ -126,6 +129,7 @@ export default function TicketPage() {
             }
 
             console.error('Error processing scan:', err);
+            return false;
         } finally {
             setIsScanning(false);
         }
@@ -247,6 +251,14 @@ export default function TicketPage() {
         setSelectedImposition(imposition);
     };
 
+    const handleManualScanSubmit = async (e: React.FormEvent) => {
+        e.preventDefault();
+        const ok = await processScanValue(manualScan.trim());
+        if (ok) {
+            setManualScan('');
+        }
+    };
+
     const handleToggleRunlist = (runlistId: string) => {
         setExpandedRunlists((prev) => {
             const newSet = new Set(prev);
@@ -283,6 +295,30 @@ export default function TicketPage() {
     return (
         <div className="ticket-page">
             <div className="left-panel">
+                <form className="manual-scan-bar" onSubmit={handleManualScanSubmit}>
+                    <label className="manual-scan-bar__label" htmlFor="manual-scan-input">
+                        Manual scan
+                    </label>
+                    <div className="manual-scan-bar__row">
+                        <input
+                            id="manual-scan-input"
+                            type="text"
+                            className="manual-scan-bar__input"
+                            value={manualScan}
+                            onChange={(e) => setManualScan(e.target.value)}
+                            placeholder="Type or paste code"
+                            disabled={isScanning}
+                            autoComplete="off"
+                        />
+                        <button
+                            type="submit"
+                            className="manual-scan-bar__submit"
+                            disabled={isScanning}
+                        >
+                            Submit
+                        </button>
+                    </div>
+                </form>
                 <div
                     className="operation-settings"
                     style={{
@@ -519,7 +555,10 @@ export default function TicketPage() {
                                         >
                                             File IDs ({fileIds.length})
                                         </div>
-                                        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-xs)' }}>
+                                        <div
+                                            className="ticket-page__fileids-scroll"
+                                            style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-xs)' }}
+                                        >
                                             {fileIds.map((fileId, index) => {
                                                 const match =
                                                     fileId.match(/^(FILE_\d+_\d+_\d+)(?:_|$)/) ||

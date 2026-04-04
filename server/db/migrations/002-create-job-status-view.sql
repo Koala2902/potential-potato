@@ -6,8 +6,8 @@
 -- LOGS DATABASE
 -- ============================================================================
 
--- Drop view if it exists (for idempotency)
-DROP VIEW IF EXISTS job_status_view;
+-- Drop view if it exists (for idempotency; later views may depend on it)
+DROP VIEW IF EXISTS job_status_view CASCADE;
 
 -- Create view that groups job_operations by job_id
 CREATE VIEW job_status_view AS

@@ -3,7 +3,16 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
-import { getProductionQueue, getImpositionDetails, getFileIds, findRunlistByScan, getProductionQueueByRunlist } from './db/queries.js';
+import {
+    getProductionQueue,
+    getImpositionDetails,
+    getFileIds,
+    findRunlistByScan,
+    getProductionQueueByRunlist,
+    getDistinctFileIdsForRunlist,
+    findRunlistIdsMatchingScanFragment,
+    findImpositionIdForScanInRunlist,
+} from './db/queries.js';
 import {
     getMachines,
     getAvailableOperations,
@@ -23,17 +32,64 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+/**
+ * Mounted folder for imposition PDFs (cannot use smb:// — mount the share in Finder, then use the /Volumes/... path).
+ * Example Synology layout: .../RDevArchive/2026/<imposition_id>.pdf
+ */
+const PDF_ARCHIVE_PATH =
+    process.env.PDF_ARCHIVE_PATH?.trim() ||
+    '/Volumes/Daily Print Jobs/_NEXT HotFolder/RDevArchive';
+
+/** Comma-separated year folder names to try under PDF_ARCHIVE_PATH (default: current year and two prior). */
+function pdfYearSubfoldersToTry(): string[] {
+    if (process.env.PDF_ARCHIVE_TRY_YEAR_SUBFOLDERS === 'false') {
+        return [];
+    }
+    const custom = process.env.PDF_ARCHIVE_YEAR_FOLDERS?.trim();
+    if (custom) {
+        return custom.split(',').map((s) => s.trim()).filter(Boolean);
+    }
+    const y = new Date().getFullYear();
+    return [String(y), String(y - 1), String(y - 2)];
+}
+
+/** First path that exists: flat `<archive>/<id>.pdf`, then `<archive>/<year>/<id>.pdf`. */
+function resolvePdfPathForImposition(impositionId: string): string | null {
+    const name = `${impositionId}.pdf`;
+    const direct = path.join(PDF_ARCHIVE_PATH, name);
+    if (fs.existsSync(direct)) {
+        return direct;
+    }
+    for (const y of pdfYearSubfoldersToTry()) {
+        const nested = path.join(PDF_ARCHIVE_PATH, y, name);
+        if (fs.existsSync(nested)) {
+            return nested;
+        }
+    }
+    return null;
+}
+
 console.log('Starting server...');
 console.log(`Port: ${PORT}`);
 console.log('Logs DB: configured via LOGS_DATABASE_URL or LOGS_DB_*');
 console.log('App DB: configured via DATABASE_URL or APP_DB_*');
+console.log(`PDF archive: ${PDF_ARCHIVE_PATH} (flat + year subfolders: ${pdfYearSubfoldersToTry().join(', ') || 'off'})`);
+if (!fs.existsSync(PDF_ARCHIVE_PATH)) {
+    console.warn(
+        `[pdf] Path does not exist or is not mounted. Mount the SMB share in Finder, set PDF_ARCHIVE_PATH to the RDevArchive folder (not smb://).`
+    );
+}
+
+/** Logs a warning when no PDF exists under the archive (flat or year subfolder). */
+function warnIfPdfMissing(impositionId: string): void {
+    if (!resolvePdfPathForImposition(impositionId)) {
+        console.warn(`[pdf] Not found under ${PDF_ARCHIVE_PATH}: ${impositionId}.pdf`);
+    }
+}
 
 app.use(cors());
 app.use(express.json());
 app.use('/api/scheduler', schedulerRouter);
-
-// PDF archive folder path
-const PDF_ARCHIVE_PATH = '/Volumes/Daily Print Jobs/_NEXT HotFolder/RDevArchive';
 
 // Root route - server status
 app.get('/', (req, res) => {
@@ -103,9 +159,9 @@ app.get('/api/imposition/:impositionId/file-ids', async (req, res) => {
 app.head('/api/pdf/:impositionId', async (req, res) => {
     try {
         const { impositionId } = req.params;
-        const pdfPath = path.join(PDF_ARCHIVE_PATH, `${impositionId}.pdf`);
-        
-        if (fs.existsSync(pdfPath)) {
+        const pdfPath = resolvePdfPathForImposition(impositionId);
+
+        if (pdfPath && fs.existsSync(pdfPath)) {
             const stats = fs.statSync(pdfPath);
             res.setHeader('Content-Type', 'application/pdf');
             res.setHeader('Content-Length', stats.size.toString());
@@ -123,11 +179,10 @@ app.head('/api/pdf/:impositionId', async (req, res) => {
 app.get('/api/pdf/:impositionId', async (req, res) => {
     try {
         const { impositionId } = req.params;
-        const pdfPath = path.join(PDF_ARCHIVE_PATH, `${impositionId}.pdf`);
-        
-        // Check if file exists
-        if (!fs.existsSync(pdfPath)) {
-            console.log('PDF not found:', pdfPath);
+        const pdfPath = resolvePdfPathForImposition(impositionId);
+
+        if (!pdfPath) {
+            console.warn('[pdf] Not found:', path.join(PDF_ARCHIVE_PATH, `${impositionId}.pdf`), '(and year subfolders)');
             return res.status(404).json({ error: 'PDF not found' });
         }
         
@@ -733,57 +788,43 @@ app.post('/api/scan', async (req, res) => {
             return res.status(400).json({ error: 'Scan input is required' });
         }
 
-        console.log(`[POST /api/scan] Processing scan: "${scan}"`);
-        console.log(`[POST /api/scan] Request body - machineId: ${machineId}, operations: ${JSON.stringify(operations)}, userId: ${userId}`);
+        console.log(
+            `[POST /api/scan] scan="${scan}" machineId=${machineId ?? '—'} ops=${operations ? 'yes' : 'no'}`
+        );
         const runlistId = await findRunlistByScan(scan);
         
         // Get individual file IDs for this runlist (for display purposes)
         let individualFileIds: any[] = [];
         if (runlistId) {
             try {
-                const client = await appPool.connect();
-                try {
-                    const fileIdsResult = await client.query(`
-                        SELECT DISTINCT ifm.file_id
-                        FROM imposition_file_mapping ifm
-                        INNER JOIN production_planner_paths ppp ON ifm.imposition_id = ppp.imposition_id
-                        WHERE ppp.runlist_id = $1
-                        ORDER BY ifm.file_id
-                    `, [runlistId]);
-                    
-                    // Parse file_ids to get simplified job_id_version_tag format
-                    for (const row of fileIdsResult.rows) {
-                        const fileId = row.file_id;
-                        // Simple parsing - extract job_id and version_tag
-                        const match = fileId.match(/^FILE_(\d+)_Labex_(.+)$/);
-                        if (match) {
-                            const versionTag = match[1];
-                            const afterLabex = match[2];
-                            const parts = afterLabex.split('_');
-                            if (parts.length >= 2) {
-                                const numericParts: string[] = [];
-                                for (const part of parts) {
-                                    if (/^\d+$/.test(part)) {
-                                        numericParts.push(part);
-                                    } else {
-                                        break;
-                                    }
+                const fileIdsResult = await getDistinctFileIdsForRunlist(runlistId);
+                for (const row of fileIdsResult) {
+                    const fileId = row.file_id;
+                    const match = fileId.match(/^FILE_(\d+)_Labex_(.+)$/);
+                    if (match) {
+                        const versionTag = match[1];
+                        const afterLabex = match[2];
+                        const parts = afterLabex.split('_');
+                        if (parts.length >= 2) {
+                            const numericParts: string[] = [];
+                            for (const part of parts) {
+                                if (/^\d+$/.test(part)) {
+                                    numericParts.push(part);
+                                } else {
+                                    break;
                                 }
-                                if (numericParts.length >= 2) {
-                                    const jobId = numericParts.join('_');
-                                    individualFileIds.push({
-                                        file_id: fileId,
-                                        code_text: `${jobId}_${versionTag}`,
-                                        job_id: jobId,
-                                        version_tag: versionTag
-                                    });
-                                }
+                            }
+                            if (numericParts.length >= 2) {
+                                const jobId = numericParts.join('_');
+                                individualFileIds.push({
+                                    file_id: fileId,
+                                    code_text: `${jobId}_${versionTag}`,
+                                    job_id: jobId,
+                                    version_tag: versionTag
+                                });
                             }
                         }
                     }
-                    console.log(`[POST /api/scan] Found ${individualFileIds.length} individual file_ids in runlist`);
-                } finally {
-                    client.release();
                 }
             } catch (err) {
                 console.error('Error getting individual file IDs:', err);
@@ -801,13 +842,8 @@ app.post('/api/scan', async (req, res) => {
             const opsPayload: Record<string, unknown> | null = hasOpList
                 ? { operations }
                 : null;
-            console.log(
-                `[POST /api/scan] machineId provided, will record scans (operations: ${hasOpList ? 'yes' : 'machine only'})`
-            );
             try {
                 if (isRunlistDirectScan) {
-                    // If user scanned the actual runlist barcode, record scans for all files
-                    console.log(`[POST /api/scan] Direct runlist scan detected for ${runlistId}, recording scans for all file_ids`);
                     const scans = await recordRunlistScans(
                         runlistId,
                         machineId,
@@ -820,10 +856,7 @@ app.post('/api/scan', async (req, res) => {
                         code_text: s.code_text,
                         scanned_at: s.scanned_at
                     }));
-                    console.log(`[POST /api/scan] Recorded ${recordedScans.length} individual file_id scans`);
                 } else {
-                    // Regular scan (single file_id or job_id_version_tag), record only the scanned item
-                    console.log(`[POST /api/scan] Individual file scan, recording only: ${scan}`);
                     const scannedCode = await recordScannedCode(
                         scan,
                         machineId,
@@ -848,106 +881,40 @@ app.post('/api/scan', async (req, res) => {
                 console.error('Error recording scan (continuing anyway):', recordError);
                 // Continue even if recording fails
             }
-        } else {
-            console.log(`[POST /api/scan] Skipping scan recording — no machineId (operations: ${JSON.stringify(operations)})`);
         }
         if (!runlistId) {
-            // Check if multiple runlists matched (partial match returned null)
-            const client = await appPool.connect();
-            try {
-                const multipleMatch = await client.query(
-                    `SELECT DISTINCT runlist_id 
-                     FROM production_planner_paths 
-                     WHERE (runlist_id LIKE $1 OR runlist_id LIKE $2)
-                     AND runlist_id IS NOT NULL`,
-                    [`${scan}%`, `%${scan}%`]
-                );
-                
-                console.log(`[POST /api/scan] Multiple match check: ${multipleMatch.rows.length} results`);
-                
-                if (multipleMatch.rows.length > 1) {
-                    console.log(`[POST /api/scan] Multiple matches found:`, multipleMatch.rows.map(r => r.runlist_id));
-                    return res.status(400).json({ 
-                        error: `Multiple runlists found matching "${scan}". Please scan the full runlist ID.`,
-                        matches: multipleMatch.rows.map(r => r.runlist_id)
-                    });
-                } else if (multipleMatch.rows.length === 1) {
-                    // This shouldn't happen, but handle it just in case
-                    console.log(`[POST /api/scan] Found single match in error check: ${multipleMatch.rows[0].runlist_id}`);
-                    const queue = await getProductionQueueByRunlist(multipleMatch.rows[0].runlist_id);
-                    return res.json({ 
-                        runlistId: multipleMatch.rows[0].runlist_id, 
-                        queue,
-                        recordedScans: recordedScans.length > 0 ? recordedScans : undefined
-                    });
-                }
-            } finally {
-                client.release();
+            const matchIds = await findRunlistIdsMatchingScanFragment(scan);
+
+            if (matchIds.length > 1) {
+                return res.status(400).json({
+                    error: `Multiple runlists found matching "${scan}". Please scan the full runlist ID.`,
+                    matches: matchIds
+                });
+            } else if (matchIds.length === 1) {
+                const queue = await getProductionQueueByRunlist(matchIds[0]);
+                return res.json({
+                    runlistId: matchIds[0],
+                    queue,
+                    recordedScans: recordedScans.length > 0 ? recordedScans : undefined
+                });
             }
-            
-            console.log(`[POST /api/scan] No runlist found for scan: "${scan}"`);
+
             return res.status(404).json({ error: `No runlist found for scan: "${scan}"` });
         }
-        
-        console.log(`[POST /api/scan] Found runlist: ${runlistId}`);
 
         // Get production queue for this runlist (show all impositions)
         const queue = await getProductionQueueByRunlist(runlistId);
         
-        // Find which specific imposition contains the scanned file (for auto-selection)
+        // Imposition for preview: must belong to this runlist (same matching rules as findRunlistByScan)
         let scannedImpositionId: string | null = null;
         if (!isRunlistDirectScan && queue.length > 0) {
-            const client = await appPool.connect();
             try {
-                // Parse scan to find the file_id pattern
-                const parts = scan.split('_');
-                if (parts.length >= 3) {
-                    const version = parts[parts.length - 1];
-                    const jobIdParts = parts.slice(0, -1);
-                    const jobId = jobIdParts.join('_');
-                    const filePattern = `FILE_${version}_Labex_${jobId}_%`;
-                    
-                    console.log(`[POST /api/scan] Looking for imposition_id with pattern: ${filePattern}`);
-                    
-                    const impositionResult = await client.query(`
-                        SELECT DISTINCT imposition_id
-                        FROM imposition_file_mapping
-                        WHERE file_id LIKE $1
-                        LIMIT 1
-                    `, [filePattern]);
-                    
-                    if (impositionResult.rows.length > 0) {
-                        scannedImpositionId = impositionResult.rows[0].imposition_id;
-                        console.log(`[POST /api/scan] Scanned file belongs to imposition: ${scannedImpositionId}`);
-                        
-                        // Also check if PDF exists for debugging
-                        const pdfPath = path.join(PDF_ARCHIVE_PATH, `${scannedImpositionId}.pdf`);
-                        const pdfExists = fs.existsSync(pdfPath);
-                        console.log(`[POST /api/scan] PDF exists for imposition ${scannedImpositionId}: ${pdfExists} (path: ${pdfPath})`);
-                    } else {
-                        console.log(`[POST /api/scan] No imposition found for pattern: ${filePattern}`);
-                        
-                        // Try alternative pattern matching - check what file_ids actually exist
-                        const debugResult = await client.query(`
-                            SELECT DISTINCT file_id, imposition_id
-                            FROM imposition_file_mapping
-                            WHERE file_id LIKE $1 OR file_id LIKE $2
-                            LIMIT 5
-                        `, [`FILE_${version}_Labex_%${jobId}%`, `FILE_%_Labex_${jobId}_%`]);
-                        
-                        if (debugResult.rows.length > 0) {
-                            console.log(`[POST /api/scan] Found similar file_ids:`, debugResult.rows.map(r => ({ file_id: r.file_id, imposition_id: r.imposition_id })));
-                        } else {
-                            console.log(`[POST /api/scan] No similar file_ids found for jobId: ${jobId}, version: ${version}`);
-                        }
-                    }
-                } else {
-                    console.log(`[POST /api/scan] Scan format invalid (need at least 3 parts): ${scan}`);
+                scannedImpositionId = await findImpositionIdForScanInRunlist(scan, runlistId);
+                if (scannedImpositionId) {
+                    warnIfPdfMissing(scannedImpositionId);
                 }
             } catch (err) {
                 console.error(`[POST /api/scan] Error finding imposition_id:`, err);
-            } finally {
-                client.release();
             }
         }
         

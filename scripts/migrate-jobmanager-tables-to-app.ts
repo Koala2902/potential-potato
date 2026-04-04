@@ -6,7 +6,7 @@
  * - `machineId` on operations is rewritten by matching **machine_name** between source and target
  *   (case-insensitive, trimmed) so names tie operations to the correct press when IDs differ.
  *
- * Run: npm run run-migrations   then   npm run migrate-jobmanager-tables
+ * Run: npm run prisma:push   then   npm run migrate-jobmanager-tables
  *
  * Source URL: JOBMANAGER_DATABASE_URL, or same URL as DATABASE_URL with database `jobmanager`.
  */

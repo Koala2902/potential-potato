@@ -6,8 +6,16 @@ import dotenv from 'dotenv';
 
 import { appPool } from './app-connection.js';
 import logsPool from './connection.js';
+import { withPlannerAppThenLogsOnEmpty } from './planner-client.js';
 import { isUndefinedTableError } from './pg-errors.js';
 import { prisma } from './prisma.js';
+import {
+    fileIdPatternLoose,
+    fileIdPatternStrict,
+    isNumericVersionSuffix,
+    labexJobIdSegmentPattern,
+    parseJobIdVersionTagScan,
+} from './scan-job-version.js';
 
 dotenv.config();
 
@@ -89,16 +97,13 @@ async function updateLastProcessedMarker(markerType: 'print_os' | 'scanned_codes
  * Get file_ids for an imposition_id
  */
 async function getFileIdsForImposition(impositionId: string): Promise<string[]> {
-    const client = await appPool.connect();
-    try {
+    return withPlannerAppThenLogsOnEmpty(async (client) => {
         const result = await client.query(
             'SELECT file_id FROM imposition_file_mapping WHERE imposition_id = $1 ORDER BY sequence_order NULLS LAST, file_id',
             [impositionId]
         );
-        return result.rows.map(row => row.file_id);
-    } finally {
-        client.release();
-    }
+        return result.rows.map((row) => row.file_id);
+    }, (rows) => rows.length === 0);
 }
 
 /**
@@ -592,22 +597,40 @@ async function updateJobOperationsField(
  * Get all file_ids for a job_id across all impositions
  */
 async function getAllFileIdsForJob(jobId: string, versionTag: string): Promise<string[]> {
-    const client = await appPool.connect();
-    try {
-        // Find all file_ids that match this job_id and version_tag
-        const pattern = `FILE_${versionTag}_Labex_${jobId}_%`;
-        
+    return withPlannerAppThenLogsOnEmpty(async (client) => {
+        const pattern = fileIdPatternStrict(jobId, versionTag);
+
         const result = await client.query(
             `SELECT DISTINCT file_id 
              FROM imposition_file_mapping 
              WHERE file_id LIKE $1`,
             [pattern]
         );
-        
-        return result.rows.map(row => row.file_id);
-    } finally {
-        client.release();
-    }
+
+        let ids = result.rows.map((row) => row.file_id);
+
+        if (ids.length === 0 && isNumericVersionSuffix(versionTag)) {
+            const loose = await client.query(
+                `SELECT DISTINCT file_id 
+                 FROM imposition_file_mapping 
+                 WHERE file_id LIKE $1`,
+                [fileIdPatternLoose(jobId)]
+            );
+            ids = loose.rows.map((row) => row.file_id);
+        }
+
+        if (ids.length === 0) {
+            const labex = await client.query(
+                `SELECT DISTINCT file_id 
+                 FROM imposition_file_mapping 
+                 WHERE file_id LIKE $1`,
+                [labexJobIdSegmentPattern(jobId)]
+            );
+            ids = labex.rows.map((row) => row.file_id);
+        }
+
+        return ids;
+    }, (rows) => rows.length === 0);
 }
 
 /**
@@ -615,27 +638,25 @@ async function getAllFileIdsForJob(jobId: string, versionTag: string): Promise<s
  */
 async function checkAndUpdateJobPrintStatus(jobId: string, versionTag: string): Promise<void> {
     const client = await appPool.connect();
-    
+
     try {
-        // Get all file_ids for this job/version
         const fileIds = await getAllFileIdsForJob(jobId, versionTag);
-        
+
         if (fileIds.length === 0) {
-            return; // No files to check
+            return;
         }
 
-        // Get print operation_id
         const printOperationId = await getPrintOperationId();
-        
-        // Get all impositions that contain these file_ids
-        const impositionResult = await client.query(
-            `SELECT DISTINCT imposition_id 
-             FROM imposition_file_mapping 
-             WHERE file_id = ANY($1)`,
-            [fileIds]
-        );
-        
-        const impositionIds = impositionResult.rows.map(row => row.imposition_id);
+
+        const impositionIds = await withPlannerAppThenLogsOnEmpty(async (planner) => {
+            const impositionResult = await planner.query(
+                `SELECT DISTINCT imposition_id 
+                 FROM imposition_file_mapping 
+                 WHERE file_id = ANY($1)`,
+                [fileIds]
+            );
+            return impositionResult.rows.map((row) => row.imposition_id as string);
+        }, (ids) => ids.length === 0);
         
         if (impositionIds.length === 0) {
             return;
@@ -1070,21 +1091,20 @@ async function isRunlistId(codeText: string): Promise<boolean> {
     if (productionPlannerPathsMissingLogged) {
         return false;
     }
-    const client = await appPool.connect();
     try {
-        const result = await client.query(
-            'SELECT EXISTS(SELECT 1 FROM production_planner_paths WHERE runlist_id = $1 LIMIT 1)',
-            [codeText]
-        );
-        return result.rows[0].exists;
+        return await withPlannerAppThenLogsOnEmpty(async (client) => {
+            const result = await client.query(
+                'SELECT EXISTS(SELECT 1 FROM production_planner_paths WHERE runlist_id = $1 LIMIT 1)',
+                [codeText]
+            );
+            return Boolean(result.rows[0]?.exists);
+        }, (exists) => !exists);
     } catch (e) {
         if (isUndefinedTableError(e)) {
             productionPlannerPathsMissingLogged = true;
             return false;
         }
         throw e;
-    } finally {
-        client.release();
     }
 }
 
@@ -1095,60 +1115,69 @@ async function getJobIdsFromRunlist(runlistId: string): Promise<Map<string, Set<
     if (productionPlannerPathsMissingLogged) {
         return new Map();
     }
-    const client = await appPool.connect();
     try {
-        console.log(`[getJobIdsFromRunlist] Getting jobs for runlist: ${runlistId}`);
-        let impositionsResult;
-        try {
-            impositionsResult = await client.query(
-                'SELECT DISTINCT imposition_id FROM production_planner_paths WHERE runlist_id = $1',
-                [runlistId]
-            );
-        } catch (e) {
-            if (isUndefinedTableError(e)) {
-                if (!productionPlannerPathsMissingLogged) {
-                    productionPlannerPathsMissingLogged = true;
-                    console.warn(
-                        '[getJobIdsFromRunlist] table "production_planner_paths" missing on app DB — run migrations. Skipping runlist expansion.'
-                    );
-                }
-                return new Map();
-            }
-            throw e;
-        }
-
-        console.log(`[getJobIdsFromRunlist] Found ${impositionsResult.rows.length} impositions in runlist`);
-        const jobMap = new Map<string, Set<string>>();
-
-        // For each imposition, get file_ids and extract job_ids
-        for (const row of impositionsResult.rows) {
-            const impositionId = row.imposition_id;
-            const fileIds = await getFileIdsForImposition(impositionId);
-            console.log(`[getJobIdsFromRunlist] Imposition ${impositionId} has ${fileIds.length} file_ids`);
-            
-            // Extract job_ids from file_ids
-            for (const fileId of fileIds) {
-                const parsed = parseFileId(fileId);
-                if (parsed) {
-                    console.log(`[getJobIdsFromRunlist] Parsed file_id "${fileId}" -> jobId: "${parsed.jobId}", version: "${parsed.versionTag}"`);
-                    if (!jobMap.has(parsed.jobId)) {
-                        jobMap.set(parsed.jobId, new Set());
+        return await withPlannerAppThenLogsOnEmpty(async (client) => {
+            console.log(`[getJobIdsFromRunlist] Getting jobs for runlist: ${runlistId}`);
+            let impositionsResult;
+            try {
+                impositionsResult = await client.query(
+                    'SELECT DISTINCT imposition_id FROM production_planner_paths WHERE runlist_id = $1',
+                    [runlistId]
+                );
+            } catch (e) {
+                if (isUndefinedTableError(e)) {
+                    if (!productionPlannerPathsMissingLogged) {
+                        productionPlannerPathsMissingLogged = true;
+                        console.warn(
+                            '[getJobIdsFromRunlist] table "production_planner_paths" missing — run migrations. Skipping runlist expansion.'
+                        );
                     }
-                    jobMap.get(parsed.jobId)!.add(parsed.versionTag);
-                } else {
-                    console.log(`[getJobIdsFromRunlist] Could not parse file_id: "${fileId}"`);
+                    return new Map();
+                }
+                throw e;
+            }
+
+            console.log(`[getJobIdsFromRunlist] Found ${impositionsResult.rows.length} impositions in runlist`);
+            const jobMap = new Map<string, Set<string>>();
+
+            for (const row of impositionsResult.rows) {
+                const impositionId = row.imposition_id;
+                const fileResult = await client.query(
+                    'SELECT file_id FROM imposition_file_mapping WHERE imposition_id = $1 ORDER BY sequence_order NULLS LAST, file_id',
+                    [impositionId]
+                );
+                const fileIds = fileResult.rows.map((r) => r.file_id);
+                console.log(`[getJobIdsFromRunlist] Imposition ${impositionId} has ${fileIds.length} file_ids`);
+
+                for (const fileId of fileIds) {
+                    const parsed = parseFileId(fileId);
+                    if (parsed) {
+                        console.log(
+                            `[getJobIdsFromRunlist] Parsed file_id "${fileId}" -> jobId: "${parsed.jobId}", version: "${parsed.versionTag}"`
+                        );
+                        if (!jobMap.has(parsed.jobId)) {
+                            jobMap.set(parsed.jobId, new Set());
+                        }
+                        jobMap.get(parsed.jobId)!.add(parsed.versionTag);
+                    } else {
+                        console.log(`[getJobIdsFromRunlist] Could not parse file_id: "${fileId}"`);
+                    }
                 }
             }
+
+            console.log(`[getJobIdsFromRunlist] Extracted ${jobMap.size} unique jobs from runlist`);
+            for (const [jobId, versions] of jobMap.entries()) {
+                console.log(`[getJobIdsFromRunlist] Job "${jobId}" has versions: ${Array.from(versions).join(', ')}`);
+            }
+
+            return jobMap;
+        }, (map) => map.size === 0);
+    } catch (e) {
+        if (isUndefinedTableError(e)) {
+            productionPlannerPathsMissingLogged = true;
+            return new Map();
         }
-        
-        console.log(`[getJobIdsFromRunlist] Extracted ${jobMap.size} unique jobs from runlist`);
-        for (const [jobId, versions] of jobMap.entries()) {
-            console.log(`[getJobIdsFromRunlist] Job "${jobId}" has versions: ${Array.from(versions).join(', ')}`);
-        }
-        
-        return jobMap;
-    } finally {
-        client.release();
+        throw e;
     }
 }
 
@@ -1159,46 +1188,69 @@ async function findRunlistByJobScan(codeText: string): Promise<string | null> {
     if (productionPlannerPathsMissingLogged) {
         return null;
     }
-    const client = await appPool.connect();
+    const jv = parseJobIdVersionTagScan(codeText);
+    if (!jv) {
+        return null;
+    }
+
     try {
-        // Parse job_id_version_tag format
-        const parts = codeText.split('_');
-        if (parts.length < 3) {
+        return await withPlannerAppThenLogsOnEmpty(async (client) => {
+            const tryQuery = async (pattern: string, limit: number) =>
+                client.query(
+                    `SELECT DISTINCT ppp.runlist_id
+                     FROM imposition_file_mapping ifm
+                     INNER JOIN production_planner_paths ppp ON ifm.imposition_id = ppp.imposition_id
+                     WHERE ifm.file_id LIKE $1
+                     AND ppp.runlist_id IS NOT NULL
+                     LIMIT $2`,
+                    [pattern, limit]
+                );
+
+            try {
+                const strictPat = fileIdPatternStrict(jv.jobId, jv.versionTag);
+                const result = await tryQuery(strictPat, 1);
+
+                if (result.rows.length > 0) {
+                    return result.rows[0].runlist_id as string;
+                }
+
+                if (isNumericVersionSuffix(jv.versionTag)) {
+                    const loose = await tryQuery(fileIdPatternLoose(jv.jobId), 3);
+                    if (loose.rows.length === 1) {
+                        return loose.rows[0].runlist_id as string;
+                    }
+                    if (loose.rows.length > 1) {
+                        console.warn(
+                            `[findRunlistByJobScan] loose match for job ${jv.jobId} returned multiple runlists; skipping`
+                        );
+                    }
+                }
+
+                const labex = await tryQuery(labexJobIdSegmentPattern(jv.jobId), 3);
+                if (labex.rows.length === 1) {
+                    return labex.rows[0].runlist_id as string;
+                }
+                if (labex.rows.length > 1) {
+                    console.warn(
+                        `[findRunlistByJobScan] Labex_${jv.jobId} matched multiple runlists; skipping`
+                    );
+                }
+
+                return null;
+            } catch (e) {
+                if (isUndefinedTableError(e)) {
+                    productionPlannerPathsMissingLogged = true;
+                    return null;
+                }
+                throw e;
+            }
+        }, (id) => id === null);
+    } catch (e) {
+        if (isUndefinedTableError(e)) {
+            productionPlannerPathsMissingLogged = true;
             return null;
         }
-        
-        const version = parts[parts.length - 1];
-        const jobIdParts = parts.slice(0, -1);
-        const jobId = jobIdParts.join('_');
-        
-        // Match file_id pattern: FILE_<version>_Labex_<job_id>_*
-        const pattern = `FILE_${version}_Labex_${jobId}_%`;
-        
-        try {
-            const result = await client.query(
-                `SELECT DISTINCT ppp.runlist_id
-                 FROM imposition_file_mapping ifm
-                 INNER JOIN production_planner_paths ppp ON ifm.imposition_id = ppp.imposition_id
-                 WHERE ifm.file_id LIKE $1
-                 AND ppp.runlist_id IS NOT NULL
-                 LIMIT 1`,
-                [pattern]
-            );
-
-            if (result.rows.length === 0) {
-                return null;
-            }
-
-            return result.rows[0].runlist_id;
-        } catch (e) {
-            if (isUndefinedTableError(e)) {
-                productionPlannerPathsMissingLogged = true;
-                return null;
-            }
-            throw e;
-        }
-    } finally {
-        client.release();
+        throw e;
     }
 }
 
@@ -1206,28 +1258,53 @@ async function findRunlistByJobScan(codeText: string): Promise<string | null> {
  * Get impositions for a job_id
  */
 async function getImpositionsForJob(jobId: string, versionTag: string): Promise<string[]> {
-    const client = await appPool.connect();
     try {
-        // Find file_ids that match this job_id and version_tag
-        const pattern = `FILE_${versionTag}_Labex_${jobId}_%`;
+        return await withPlannerAppThenLogsOnEmpty(async (client) => {
+            const pattern = fileIdPatternStrict(jobId, versionTag);
 
-        try {
-            const result = await client.query(
-                `SELECT DISTINCT imposition_id 
-                 FROM imposition_file_mapping 
-                 WHERE file_id LIKE $1`,
-                [pattern]
-            );
+            try {
+                const result = await client.query(
+                    `SELECT DISTINCT imposition_id 
+                     FROM imposition_file_mapping 
+                     WHERE file_id LIKE $1`,
+                    [pattern]
+                );
 
-            return result.rows.map((row) => row.imposition_id);
-        } catch (e) {
-            if (isUndefinedTableError(e)) {
-                return [];
+                let ids = result.rows.map((row) => row.imposition_id);
+
+                if (ids.length === 0 && isNumericVersionSuffix(versionTag)) {
+                    const loose = await client.query(
+                        `SELECT DISTINCT imposition_id 
+                         FROM imposition_file_mapping 
+                         WHERE file_id LIKE $1`,
+                        [fileIdPatternLoose(jobId)]
+                    );
+                    ids = loose.rows.map((row) => row.imposition_id);
+                }
+
+                if (ids.length === 0) {
+                    const labex = await client.query(
+                        `SELECT DISTINCT imposition_id 
+                         FROM imposition_file_mapping 
+                         WHERE file_id LIKE $1`,
+                        [labexJobIdSegmentPattern(jobId)]
+                    );
+                    ids = labex.rows.map((row) => row.imposition_id);
+                }
+
+                return ids;
+            } catch (e) {
+                if (isUndefinedTableError(e)) {
+                    return [];
+                }
+                throw e;
             }
-            throw e;
+        }, (rows) => rows.length === 0);
+    } catch (e) {
+        if (isUndefinedTableError(e)) {
+            return [];
         }
-    } finally {
-        client.release();
+        throw e;
     }
 }
 

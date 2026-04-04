@@ -30,6 +30,7 @@ const TABLES_IN_FK_ORDER = [
   "MaterialOverride",
   "OperationDependency",
   "Job",
+  "JobMachineSchedule",
 ] as const;
 
 function assertSafeDbName(name: string): string {

@@ -42,15 +42,22 @@ WHERE completed_by IS NOT NULL;
 -- ============================================================================
 -- JOBMANAGER DATABASE
 -- ============================================================================
+-- App DB: legacy public.jobs (optional). Prisma-only DBs have no jobs table.
 
--- Add operations JSONB field to jobs table (if not exists)
-ALTER TABLE jobs 
-ADD COLUMN IF NOT EXISTS operations JSONB DEFAULT '{}'::jsonb;
-
--- Create index on operations field for efficient querying
-CREATE INDEX IF NOT EXISTS idx_jobs_operations_gin 
-ON jobs USING gin(operations) 
-WHERE operations IS NOT NULL;
+-- `jobs` may not exist on a fresh Prisma-only database; skip ALTER when absent.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = 'public' AND table_name = 'jobs'
+  ) THEN
+    ALTER TABLE jobs
+    ADD COLUMN IF NOT EXISTS operations JSONB DEFAULT '{}'::jsonb;
+    CREATE INDEX IF NOT EXISTS idx_jobs_operations_gin
+    ON jobs USING gin(operations)
+    WHERE operations IS NOT NULL;
+  END IF;
+END $$;
 
 -- Create processing_markers table to track last processed records
 CREATE TABLE IF NOT EXISTS processing_markers (

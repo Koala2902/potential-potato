@@ -21,6 +21,7 @@ model Machine {
   sortOrder   Int
   constants   Json     @default("{}")
   operations  Operation[]
+  jobSchedules JobMachineSchedule[]
 
   @@schema("scheduler")
 }
@@ -126,7 +127,6 @@ model Job {
   connectorId      String?
   connector        Connector? @relation(fields: [connectorId], references: [id], onDelete: SetNull)
   externalId       String?
-  scheduledDate    DateTime?
   createdAt        DateTime  @default(now())
   pdfQty           Int
   /// Composite key: `substrate_printcolour` (see job-material-key.ts). Not the PDF file name.
@@ -144,8 +144,6 @@ model Job {
   labelHeightMm    Float?
   labelGapMm       Float?
   labelsAcross     Int?
-  labelOuterWidthMm Float?
-  labelSizeId      String?
   overlaminateFilm String?
   rollLengthMetres Float?
   forClient        Boolean?
@@ -168,6 +166,21 @@ model Job {
   timeEstimationError     String?
   timeEstimationAt        DateTime?
 
+  machineSchedules JobMachineSchedule[]
+
   @@index([connectorId, externalId])
+  @@schema("scheduler")
+}
+
+/// Per-machine calendar placement: unique (job, machine); upsert updates scheduledDate.
+model JobMachineSchedule {
+  id              String   @id @default(uuid())
+  jobId           String
+  job             Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  machineId       String
+  machine         Machine  @relation(fields: [machineId], references: [id], onDelete: Cascade)
+  scheduledDate   DateTime
+
+  @@unique([jobId, machineId])
   @@schema("scheduler")
 }

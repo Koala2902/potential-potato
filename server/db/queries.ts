@@ -1,5 +1,12 @@
-import { appPool } from './app-connection.js';
 import { isUndefinedTableError } from './pg-errors.js';
+import { withPlannerAppThenLogsOnEmpty } from './planner-client.js';
+import {
+    fileIdPatternLoose,
+    fileIdPatternStrict,
+    isNumericVersionSuffix,
+    labexJobIdSegmentPattern,
+    parseJobIdVersionTagScan,
+} from './scan-job-version.js';
 
 export interface ProductionQueueItem {
     runlist_id: string;
@@ -21,11 +28,9 @@ export interface ImpositionDetails {
 
 // Get production queue grouped by runlist_id
 export async function getProductionQueue(): Promise<ProductionQueueItem[]> {
-    const client = await appPool.connect();
     try {
-        // Query production_planner_paths table grouped by runlist_id
-        // Only include rows where runlist_id is not NULL
-        const result = await client.query(`
+        return await withPlannerAppThenLogsOnEmpty(async (client) => {
+            const result = await client.query(`
             SELECT 
                 runlist_id,
                 COUNT(DISTINCT imposition_id) as imposition_count,
@@ -36,68 +41,58 @@ export async function getProductionQueue(): Promise<ProductionQueueItem[]> {
             ORDER BY runlist_id
         `);
 
-        const queue: ProductionQueueItem[] = result.rows.map((row) => {
-            // Simplify imposition_id names (extract meaningful part)
-            const impositions: ImpositionItem[] = (row.imposition_ids || []).map((id: string) => {
-                // Extract a shorter, more readable name
-                // Example: "Labex_b0a315b8e5_50x50_circle_synthetic_-polypropylene_labels_gloss_laminate_280_config_1"
-                // -> "50x50 Circle Config 1"
-                const parts = id.split('_');
-                
-                // Try to get meaningful parts: size, shape, config
-                const sizeMatch = parts.find(p => /^\d+x\d+/.test(p));
-                const shapeMatch = parts.find(p => ['circle', 'rectangle', 'square'].includes(p.toLowerCase()));
-                // Find config - it might be "config" followed by a number, or "config_1" as one part
-                const configIndex = parts.findIndex(p => p.toLowerCase() === 'config');
-                const configNumber = configIndex >= 0 && configIndex < parts.length - 1 ? parts[configIndex + 1] : null;
-                
-                let simplified = id;
-                if (sizeMatch && shapeMatch && configNumber) {
-                    // Format: "50x50 Circle Config 1"
-                    const shapeCapitalized = shapeMatch.charAt(0).toUpperCase() + shapeMatch.slice(1);
-                    simplified = `${sizeMatch} ${shapeCapitalized} Config ${configNumber}`;
-                } else if (sizeMatch && configNumber) {
-                    // Format: "50x50 Config 1"
-                    simplified = `${sizeMatch} Config ${configNumber}`;
-                } else if (sizeMatch && shapeMatch) {
-                    // Format: "50x50 Circle"
-                    const shapeCapitalized = shapeMatch.charAt(0).toUpperCase() + shapeMatch.slice(1);
-                    simplified = `${sizeMatch} ${shapeCapitalized}`;
-                } else if (parts.length > 0) {
-                    // Fallback: use last few meaningful parts, capitalize first letter
-                    const lastParts = parts.slice(-3);
-                    simplified = lastParts.map((p, i) => 
-                        i === 0 ? p.charAt(0).toUpperCase() + p.slice(1) : p
-                    ).join(' ');
-                }
-                
+            const queue: ProductionQueueItem[] = result.rows.map((row) => {
+                const impositions: ImpositionItem[] = (row.imposition_ids || []).map((id: string) => {
+                    const parts = id.split('_');
+
+                    const sizeMatch = parts.find((p) => /^\d+x\d+/.test(p));
+                    const shapeMatch = parts.find((p) =>
+                        ['circle', 'rectangle', 'square'].includes(p.toLowerCase())
+                    );
+                    const configIndex = parts.findIndex((p) => p.toLowerCase() === 'config');
+                    const configNumber =
+                        configIndex >= 0 && configIndex < parts.length - 1 ? parts[configIndex + 1] : null;
+
+                    let simplified = id;
+                    if (sizeMatch && shapeMatch && configNumber) {
+                        const shapeCapitalized = shapeMatch.charAt(0).toUpperCase() + shapeMatch.slice(1);
+                        simplified = `${sizeMatch} ${shapeCapitalized} Config ${configNumber}`;
+                    } else if (sizeMatch && configNumber) {
+                        simplified = `${sizeMatch} Config ${configNumber}`;
+                    } else if (sizeMatch && shapeMatch) {
+                        const shapeCapitalized = shapeMatch.charAt(0).toUpperCase() + shapeMatch.slice(1);
+                        simplified = `${sizeMatch} ${shapeCapitalized}`;
+                    } else if (parts.length > 0) {
+                        const lastParts = parts.slice(-3);
+                        simplified = lastParts
+                            .map((p, i) => (i === 0 ? p.charAt(0).toUpperCase() + p.slice(1) : p))
+                            .join(' ');
+                    }
+
+                    return {
+                        imposition_id: id,
+                        simplified_name: simplified,
+                    };
+                });
+
                 return {
-                    imposition_id: id,
-                    simplified_name: simplified,
+                    runlist_id: row.runlist_id,
+                    imposition_count: parseInt(row.imposition_count) || impositions.length,
+                    impositions,
                 };
             });
 
-            return {
-                runlist_id: row.runlist_id,
-                imposition_count: parseInt(row.imposition_count) || impositions.length,
-                impositions,
-            };
-        });
-
-        return queue;
+            return queue;
+        }, (queue) => queue.length === 0);
     } catch (e) {
         if (isUndefinedTableError(e)) return [];
         throw e;
-    } finally {
-        client.release();
     }
 }
 
 // Get imposition details including all file_ids from imposition_file_mapping
 export async function getImpositionDetails(impositionId: string): Promise<ImpositionDetails | null> {
-    const client = await appPool.connect();
-    try {
-        // Get imposition configuration details including explanation
+    return withPlannerAppThenLogsOnEmpty(async (client) => {
         const configResult = await client.query(
             `
             SELECT DISTINCT
@@ -118,23 +113,28 @@ export async function getImpositionDetails(impositionId: string): Promise<Imposi
             return null;
         }
 
-        // Get all file_ids for this imposition
-        const fileIds = await getFileIds(impositionId);
+        const fileResult = await client.query(
+            `
+            SELECT file_id
+            FROM imposition_file_mapping
+            WHERE imposition_id = $1
+            ORDER BY sequence_order NULLS LAST, file_id
+        `,
+            [impositionId]
+        );
+        const fileIds = fileResult.rows.map((row) => row.file_id);
 
         return {
             imposition_id: impositionId,
             file_ids: fileIds,
             ...configResult.rows[0],
         };
-    } finally {
-        client.release();
-    }
+    }, (row) => row === null);
 }
 
 // Get all file_ids for an imposition_id
 export async function getFileIds(impositionId: string): Promise<string[]> {
-    const client = await appPool.connect();
-    try {
+    return withPlannerAppThenLogsOnEmpty(async (client) => {
         const result = await client.query(
             `
             SELECT file_id
@@ -145,22 +145,13 @@ export async function getFileIds(impositionId: string): Promise<string[]> {
             [impositionId]
         );
 
-        return result.rows.map(row => row.file_id);
-    } finally {
-        client.release();
-    }
+        return result.rows.map((row) => row.file_id);
+    }, (ids) => ids.length === 0);
 }
 
-// Find runlist_id by scan
-// First checks if scan is a direct runlist_id (exact or partial match)
-// If not found, tries to parse as job_id_version_tag format
+// Resolve runlist_id: runlist match, exact file_id, Labex short form, partial runlist, job_id_version_tag
 export async function findRunlistByScan(scanInput: string): Promise<string | null> {
-    const client = await appPool.connect();
-    try {
-        console.log(`[findRunlistByScan] Searching for runlist with scan: "${scanInput}"`);
-        
-        // First, check if scan is a direct runlist_id match (exact or partial)
-        // Check for exact match first
+    return withPlannerAppThenLogsOnEmpty(async (client) => {
         let exactMatch = await client.query(
             `SELECT DISTINCT runlist_id 
              FROM production_planner_paths 
@@ -168,15 +159,58 @@ export async function findRunlistByScan(scanInput: string): Promise<string | nul
              LIMIT 1`,
             [scanInput]
         );
-        
+
         if (exactMatch.rows.length === 1) {
-            console.log(`[findRunlistByScan] Found exact match: ${exactMatch.rows[0].runlist_id}`);
             return exactMatch.rows[0].runlist_id;
         }
-        
-        // Check for partial match (runlist_id starts with or contains the scan input)
-        // This handles cases where user scans just the number part
-        // Try prefix match first (more common case)
+
+        // Full file_id barcode
+        const byExactFileId = await client.query(
+            `
+            SELECT DISTINCT ppp.runlist_id
+            FROM imposition_file_mapping ifm
+            INNER JOIN production_planner_paths ppp ON ifm.imposition_id = ppp.imposition_id
+            WHERE ifm.file_id = $1
+            AND ppp.runlist_id IS NOT NULL
+            LIMIT 2
+            `,
+            [scanInput.trim()]
+        );
+        if (byExactFileId.rows.length === 1) {
+            return byExactFileId.rows[0].runlist_id;
+        }
+        if (byExactFileId.rows.length > 1) {
+            console.warn(
+                `[findRunlistByScan] file_id matches multiple runlists (${byExactFileId.rows.length}), returning null`
+            );
+            return null;
+        }
+
+        // Short QR (e.g. 5475_7066) vs DB file_id containing Labex_5475_7066
+        const short = scanInput.trim();
+        if (short.includes('_')) {
+            const byLabexSegment = await client.query(
+                `
+            SELECT DISTINCT ppp.runlist_id
+            FROM imposition_file_mapping ifm
+            INNER JOIN production_planner_paths ppp ON ifm.imposition_id = ppp.imposition_id
+            WHERE ifm.file_id LIKE $1
+            AND ppp.runlist_id IS NOT NULL
+            LIMIT 2
+            `,
+                [`%Labex_${short}%`]
+            );
+            if (byLabexSegment.rows.length === 1) {
+                return byLabexSegment.rows[0].runlist_id;
+            }
+            if (byLabexSegment.rows.length > 1) {
+                console.warn(
+                    `[findRunlistByScan] Labex short form matches multiple runlists (${byLabexSegment.rows.length}), returning null`
+                );
+                return null;
+            }
+        }
+
         let partialMatch = await client.query(
             `SELECT DISTINCT runlist_id 
              FROM production_planner_paths 
@@ -185,43 +219,19 @@ export async function findRunlistByScan(scanInput: string): Promise<string | nul
              ORDER BY runlist_id`,
             [`${scanInput}%`, `%${scanInput}%`]
         );
-        
-        console.log(`[findRunlistByScan] Partial match found ${partialMatch.rows.length} results`);
-        if (partialMatch.rows.length > 0) {
-            console.log(`[findRunlistByScan] Matches:`, partialMatch.rows.map(r => r.runlist_id));
-        }
-        
+
         if (partialMatch.rows.length === 1) {
-            // One match found - return it
-            console.log(`[findRunlistByScan] Returning single match: ${partialMatch.rows[0].runlist_id}`);
             return partialMatch.rows[0].runlist_id;
         } else if (partialMatch.rows.length > 1) {
-            // Multiple matches - return null (caller should handle error)
-            console.log(`[findRunlistByScan] Multiple matches found, returning null`);
+            // Ambiguous partial runlist match
             return null;
         }
-        
-        // If no direct runlist match, try parsing as job_id_version_tag format
-        // Parse scan input: format is "job_id_version_tag" (e.g., "4604_5889_1")
-        const parts = scanInput.split('_');
-        
-        if (parts.length < 3) {
-            // Not enough parts for job_id_version_tag format
-            return null;
-        }
-        
-        // Last part is version_tag
-        const version = parts[parts.length - 1];
-        // All parts except last are job_id
-        const jobIdParts = parts.slice(0, -1);
-        const jobId = jobIdParts.join('_');
-        
-        // Match file_id pattern: FILE_<version>_Labex_<job_id>_*
-        // Example: FILE_1_Labex_4604_5889_...
-        const pattern = `FILE_${version}_Labex_${jobId}_%`;
-        
-        const result = await client.query(
-            `
+
+        const jv = parseJobIdVersionTagScan(scanInput);
+        if (jv) {
+            const strictPat = fileIdPatternStrict(jv.jobId, jv.versionTag);
+            const strict = await client.query(
+                `
             SELECT DISTINCT ppp.runlist_id
             FROM imposition_file_mapping ifm
             INNER JOIN production_planner_paths ppp ON ifm.imposition_id = ppp.imposition_id
@@ -229,24 +239,67 @@ export async function findRunlistByScan(scanInput: string): Promise<string | nul
             AND ppp.runlist_id IS NOT NULL
             LIMIT 1
         `,
-            [pattern]
-        );
+                [strictPat]
+            );
 
-        if (result.rows.length === 0) {
-            return null;
+            if (strict.rows.length > 0) {
+                return strict.rows[0].runlist_id;
+            }
+
+            // QR may include _1 while DB FILE_* version may not match; retry any FILE_*_Labex_<jobId>_%
+            if (isNumericVersionSuffix(jv.versionTag)) {
+                const loosePat = fileIdPatternLoose(jv.jobId);
+                const loose = await client.query(
+                    `
+            SELECT DISTINCT ppp.runlist_id
+            FROM imposition_file_mapping ifm
+            INNER JOIN production_planner_paths ppp ON ifm.imposition_id = ppp.imposition_id
+            WHERE ifm.file_id LIKE $1
+            AND ppp.runlist_id IS NOT NULL
+            LIMIT 3
+        `,
+                    [loosePat]
+                );
+                if (loose.rows.length === 1) {
+                    return loose.rows[0].runlist_id;
+                }
+                if (loose.rows.length > 1) {
+                    console.warn(
+                        `[findRunlistByScan] loose job_id match for ${jv.jobId} returned multiple runlists; returning null`
+                    );
+                }
+            }
+
+            // Some file_ids omit FILE_* and only contain Labex_<jobId>…
+            const labexPat = labexJobIdSegmentPattern(jv.jobId);
+            const labex = await client.query(
+                `
+            SELECT DISTINCT ppp.runlist_id
+            FROM imposition_file_mapping ifm
+            INNER JOIN production_planner_paths ppp ON ifm.imposition_id = ppp.imposition_id
+            WHERE ifm.file_id LIKE $1
+            AND ppp.runlist_id IS NOT NULL
+            LIMIT 3
+        `,
+                [labexPat]
+            );
+            if (labex.rows.length === 1) {
+                return labex.rows[0].runlist_id;
+            }
+            if (labex.rows.length > 1) {
+                console.warn(
+                    `[findRunlistByScan] Labex_${jv.jobId} segment matched multiple runlists; returning null`
+                );
+            }
         }
 
-        return result.rows[0].runlist_id;
-    } finally {
-        client.release();
-    }
+        return null;
+    }, (id) => id === null);
 }
 
 // Get production queue filtered by runlist_id
 export async function getProductionQueueByRunlist(runlistId: string): Promise<ProductionQueueItem[]> {
-    const client = await appPool.connect();
-    try {
-        // Get impositions with sheet_width for sorting
+    return withPlannerAppThenLogsOnEmpty(async (client) => {
         const result = await client.query(
             `
             SELECT DISTINCT
@@ -265,15 +318,17 @@ export async function getProductionQueueByRunlist(runlistId: string): Promise<Pr
             return [];
         }
 
-        // Build impositions list sorted by sheet_width (smallest first)
         const impositions: ImpositionItem[] = result.rows.map((row) => {
             const id = row.imposition_id;
             const parts = id.split('_');
             const sizeMatch = parts.find((p: string) => /^\d+x\d+/.test(p));
-            const shapeMatch = parts.find((p: string) => ['circle', 'rectangle', 'square'].includes(p.toLowerCase()));
+            const shapeMatch = parts.find((p: string) =>
+                ['circle', 'rectangle', 'square'].includes(p.toLowerCase())
+            );
             const configIndex = parts.findIndex((p: string) => p.toLowerCase() === 'config');
-            const configNumber = configIndex >= 0 && configIndex < parts.length - 1 ? parts[configIndex + 1] : null;
-            
+            const configNumber =
+                configIndex >= 0 && configIndex < parts.length - 1 ? parts[configIndex + 1] : null;
+
             let simplified = id;
             if (sizeMatch && shapeMatch && configNumber) {
                 const shapeCapitalized = shapeMatch.charAt(0).toUpperCase() + shapeMatch.slice(1);
@@ -285,11 +340,11 @@ export async function getProductionQueueByRunlist(runlistId: string): Promise<Pr
                 simplified = `${sizeMatch} ${shapeCapitalized}`;
             } else if (parts.length > 0) {
                 const lastParts = parts.slice(-3);
-                simplified = lastParts.map((p: string, i: number) => 
-                    i === 0 ? p.charAt(0).toUpperCase() + p.slice(1) : p
-                ).join(' ');
+                simplified = lastParts
+                    .map((p: string, i: number) => (i === 0 ? p.charAt(0).toUpperCase() + p.slice(1) : p))
+                    .join(' ');
             }
-            
+
             return {
                 imposition_id: id,
                 simplified_name: simplified,
@@ -297,13 +352,169 @@ export async function getProductionQueueByRunlist(runlistId: string): Promise<Pr
             };
         });
 
-        return [{
-            runlist_id: runlistId,
-            imposition_count: impositions.length,
-            impositions,
-        }];
-    } finally {
-        client.release();
-    }
+        return [
+            {
+                runlist_id: runlistId,
+                imposition_count: impositions.length,
+                impositions,
+            },
+        ];
+    }, (q) => q.length === 0);
 }
 
+export async function getDistinctFileIdsForRunlist(runlistId: string): Promise<{ file_id: string }[]> {
+    return withPlannerAppThenLogsOnEmpty(async (client) => {
+        const fileIdsResult = await client.query(
+            `
+                        SELECT DISTINCT ifm.file_id
+                        FROM imposition_file_mapping ifm
+                        INNER JOIN production_planner_paths ppp ON ifm.imposition_id = ppp.imposition_id
+                        WHERE ppp.runlist_id = $1
+                        ORDER BY ifm.file_id
+                    `,
+            [runlistId]
+        );
+        return fileIdsResult.rows as { file_id: string }[];
+    }, (rows) => rows.length === 0);
+}
+
+export async function findRunlistIdsMatchingScanFragment(scan: string): Promise<string[]> {
+    return withPlannerAppThenLogsOnEmpty(async (client) => {
+        const multipleMatch = await client.query(
+            `SELECT DISTINCT runlist_id 
+                     FROM production_planner_paths 
+                     WHERE (runlist_id LIKE $1 OR runlist_id LIKE $2)
+                     AND runlist_id IS NOT NULL`,
+            [`${scan}%`, `%${scan}%`]
+        );
+        return multipleMatch.rows.map((r) => r.runlist_id as string);
+    }, (ids) => ids.length === 0);
+}
+
+/** Resolve imposition when the scan string is an exact file_id (full barcode). */
+export async function findImpositionIdByExactFileId(fileId: string): Promise<string | null> {
+    return withPlannerAppThenLogsOnEmpty(async (client) => {
+        const r = await client.query(
+            `SELECT imposition_id FROM imposition_file_mapping WHERE file_id = $1 LIMIT 1`,
+            [fileId.trim()]
+        );
+        return r.rows.length > 0 ? (r.rows[0].imposition_id as string) : null;
+    }, (id) => id === null);
+}
+
+/** Short QR like "5475_7066" while DB file_id contains "Labex_5475_7066". */
+export async function findImpositionIdByLabexShortScan(scan: string): Promise<string | null> {
+    const s = scan.trim();
+    if (!s.includes('_')) {
+        return null;
+    }
+    return withPlannerAppThenLogsOnEmpty(async (client) => {
+        const r = await client.query(
+            `SELECT DISTINCT imposition_id FROM imposition_file_mapping WHERE file_id LIKE $1 LIMIT 2`,
+            [`%Labex_${s}%`]
+        );
+        if (r.rows.length === 1) {
+            return r.rows[0].imposition_id as string;
+        }
+        if (r.rows.length > 1) {
+            console.warn(
+                `[findImpositionIdByLabexShortScan] multiple impositions for Labex_${s}, ambiguous`
+            );
+        }
+        return null;
+    }, (id) => id === null);
+}
+
+export async function findImpositionIdByFilePattern(filePattern: string): Promise<string | null> {
+    return withPlannerAppThenLogsOnEmpty(async (client) => {
+        const impositionResult = await client.query(
+            `
+                        SELECT DISTINCT imposition_id
+                        FROM imposition_file_mapping
+                        WHERE file_id LIKE $1
+                        LIMIT 1
+                    `,
+            [filePattern]
+        );
+        return impositionResult.rows.length > 0
+            ? (impositionResult.rows[0].imposition_id as string)
+            : null;
+    }, (id) => id === null);
+}
+
+const IMPOSITION_IN_RUNLIST = `
+    FROM imposition_file_mapping ifm
+    INNER JOIN production_planner_paths ppp ON ppp.imposition_id = ifm.imposition_id
+    WHERE ppp.runlist_id = $1`;
+
+/**
+ * Pick imposition for PDF/details preview after runlist is known.
+ * Scoped to this runlist only (same patterns as findRunlistByScan: exact, Labex short, FILE_*, loose, Labex segment).
+ */
+export async function findImpositionIdForScanInRunlist(
+    scan: string,
+    runlistId: string
+): Promise<string | null> {
+    return withPlannerAppThenLogsOnEmpty(async (client) => {
+        const trimmed = scan.trim();
+
+        const singleDistinct = async (sql: string, params: unknown[]): Promise<string | null> => {
+            const r = await client.query(sql, params);
+            if (r.rows.length === 1) {
+                return r.rows[0].imposition_id as string;
+            }
+            return null;
+        };
+
+        let found = await singleDistinct(
+            `SELECT DISTINCT ifm.imposition_id ${IMPOSITION_IN_RUNLIST} AND ifm.file_id = $2 LIMIT 2`,
+            [runlistId, trimmed]
+        );
+        if (found) return found;
+
+        if (trimmed.includes('_')) {
+            found = await singleDistinct(
+                `SELECT DISTINCT ifm.imposition_id ${IMPOSITION_IN_RUNLIST} AND ifm.file_id LIKE $2 LIMIT 2`,
+                [runlistId, `%Labex_${trimmed}%`]
+            );
+            if (found) return found;
+        }
+
+        const jv = parseJobIdVersionTagScan(trimmed);
+        if (jv) {
+            const patterns = [fileIdPatternStrict(jv.jobId, jv.versionTag)];
+            if (isNumericVersionSuffix(jv.versionTag)) {
+                patterns.push(fileIdPatternLoose(jv.jobId));
+            }
+            patterns.push(labexJobIdSegmentPattern(jv.jobId));
+
+            for (const pat of patterns) {
+                found = await singleDistinct(
+                    `SELECT DISTINCT ifm.imposition_id ${IMPOSITION_IN_RUNLIST} AND ifm.file_id LIKE $2 LIMIT 2`,
+                    [runlistId, pat]
+                );
+                if (found) return found;
+            }
+        }
+
+        return null;
+    }, (id) => id === null);
+}
+
+export async function findSimilarFileIdsForDebug(
+    version: string,
+    jobId: string
+): Promise<{ file_id: string; imposition_id: string }[]> {
+    return withPlannerAppThenLogsOnEmpty(async (client) => {
+        const debugResult = await client.query(
+            `
+                            SELECT DISTINCT file_id, imposition_id
+                            FROM imposition_file_mapping
+                            WHERE file_id LIKE $1 OR file_id LIKE $2
+                            LIMIT 5
+                        `,
+            [`FILE_${version}_Labex_%${jobId}%`, `FILE_%_Labex_${jobId}_%`]
+        );
+        return debugResult.rows as { file_id: string; imposition_id: string }[];
+    }, (rows) => rows.length === 0);
+}
