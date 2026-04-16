@@ -5,8 +5,8 @@ import type {
     PatchMachineInput,
     UpdateOperationBodyInput,
 } from '../lib/scheduler/validations/config';
-import type { SchedulerRoutingFlow } from '../lib/scheduler/machine-routing';
-import { ProductionQueueItem, ImpositionDetails } from '../types';
+import type { SchedulerMode, SchedulerRoutingFlow } from '../lib/scheduler/machine-routing';
+import { ProductionQueueItem, ImpositionDetails, ImpositionFileItem } from '../types';
 
 const API_BASE_URL = '/api';
 
@@ -26,7 +26,18 @@ export async function fetchImpositionDetails(impositionId: string): Promise<Impo
         }
         throw new Error('Failed to fetch imposition details');
     }
-    return response.json();
+    const data = (await response.json()) as ImpositionDetails;
+    if (Array.isArray(data.file_items)) {
+        data.file_items = data.file_items.map((item): ImpositionFileItem => {
+            const qtyNum = typeof item.qty === 'number' ? item.qty : Number(item.qty);
+            const qty = Number.isFinite(qtyNum) && qtyNum > 0 ? qtyNum : null;
+            return {
+                file_id: String(item.file_id),
+                qty,
+            };
+        });
+    }
+    return data;
 }
 
 export async function fetchFileIds(impositionId: string): Promise<string[]> {
@@ -85,14 +96,18 @@ export async function fetchProductionStatus(): Promise<ProductionStatus[]> {
     return response.json();
 }
 
-export interface Operation {
-    operation_id: string;
+/** Catalog row from GET /api/operations (scheduler.Operation). */
+export interface ScanCatalogOperation {
+    scheduler_operation_id: string;
+    planner_operation_id: string | null;
     operation_name: string;
     description?: string;
     created_at?: string;
 }
 
-export async function fetchOperations(machineId?: string | null): Promise<Operation[]> {
+export async function fetchOperations(
+    machineId?: string | null
+): Promise<ScanCatalogOperation[]> {
     const params = new URLSearchParams();
     if (machineId?.trim()) {
         params.set('machineId', machineId.trim());
@@ -120,6 +135,16 @@ export async function fetchMachineModes(machineId: string): Promise<MachineMode[
     const response = await fetch(`${API_BASE_URL}/machine-modes?${params}`);
     if (!response.ok) {
         throw new Error('Failed to fetch machine modes');
+    }
+    return response.json();
+}
+
+/** Modes from `Machine.constants.schedulerModes` (Ticket scan UI). */
+export async function fetchSchedulerModes(machineId: string): Promise<SchedulerMode[]> {
+    const params = new URLSearchParams({ machineId: machineId.trim() });
+    const response = await fetch(`${API_BASE_URL}/scheduler-modes?${params}`);
+    if (!response.ok) {
+        throw new Error('Failed to fetch scheduler modes');
     }
     return response.json();
 }

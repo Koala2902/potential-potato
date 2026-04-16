@@ -1,5 +1,8 @@
 import { isUndefinedTableError } from './pg-errors.js';
-import { withPlannerAppThenLogsOnEmpty } from './planner-client.js';
+import {
+    withImpositionFileMappingClient,
+    withPlannerAppThenLogsOnEmpty,
+} from './planner-client.js';
 import {
     fileIdPatternLoose,
     fileIdPatternStrict,
@@ -24,6 +27,34 @@ export interface ImpositionDetails {
     imposition_id: string;
     file_id: string;
     [key: string]: any;
+}
+
+function parseLabexFileIdForQty(fileId: string): { jobId: string; versionTag: string } | null {
+    if (!fileId.toLowerCase().includes('labex')) return null;
+    const m = fileId.match(/^FILE_(\d+)_Labex_(.+)$/);
+    if (!m) {
+        const simple = fileId.match(/^Labex_(\d+_\d+)(?:_|$)/i);
+        if (simple) {
+            return { jobId: simple[1]!, versionTag: '1' };
+        }
+        return null;
+    }
+
+    const versionTag = m[1]!;
+    const afterLabex = m[2]!;
+    const parts = afterLabex.split('_');
+    const numericLeading: string[] = [];
+    for (const p of parts) {
+        if (/^\d+$/.test(p)) numericLeading.push(p);
+        else break;
+    }
+    if (numericLeading.length >= 2) {
+        return { jobId: `${numericLeading[0]}_${numericLeading[1]}`, versionTag };
+    }
+    if (numericLeading.length === 1) {
+        return { jobId: numericLeading[0]!, versionTag };
+    }
+    return null;
 }
 
 // Get production queue grouped by runlist_id
@@ -92,7 +123,7 @@ export async function getProductionQueue(): Promise<ProductionQueueItem[]> {
 
 // Get imposition details including all file_ids from imposition_file_mapping
 export async function getImpositionDetails(impositionId: string): Promise<ImpositionDetails | null> {
-    return withPlannerAppThenLogsOnEmpty(async (client) => {
+    return withImpositionFileMappingClient(async (client) => {
         const configResult = await client.query(
             `
             SELECT DISTINCT
@@ -109,10 +140,6 @@ export async function getImpositionDetails(impositionId: string): Promise<Imposi
             [impositionId]
         );
 
-        if (configResult.rows.length === 0) {
-            return null;
-        }
-
         const fileResult = await client.query(
             `
             SELECT file_id
@@ -124,17 +151,57 @@ export async function getImpositionDetails(impositionId: string): Promise<Imposi
         );
         const fileIds = fileResult.rows.map((row) => row.file_id);
 
+        const parsedPairs = fileIds
+            .map((id: string) => ({ fileId: id, parsed: parseLabexFileIdForQty(id) }))
+            .filter((x): x is { fileId: string; parsed: { jobId: string; versionTag: string } } => x.parsed !== null);
+
+        const uniquePairs: Array<{ jobId: string; versionTag: string }> = [];
+        const seen = new Set<string>();
+        for (const row of parsedPairs) {
+            const key = `${row.parsed.jobId}|${row.parsed.versionTag}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            uniquePairs.push(row.parsed);
+        }
+
+        const qtyByPair = new Map<string, number | null>();
+        if (uniquePairs.length > 0) {
+            const valuesSql = uniquePairs
+                .map((_, i) => `($${i * 2 + 1}, $${i * 2 + 2})`)
+                .join(', ');
+            const valuesParams = uniquePairs.flatMap((x) => [x.jobId, x.versionTag]);
+            try {
+                const qtyResult = await client.query(
+                    `
+                    SELECT job_id, version_tag, version_quantity
+                    FROM single_page_files
+                    WHERE (job_id, version_tag) IN (${valuesSql})
+                `,
+                    valuesParams
+                );
+                for (const r of qtyResult.rows) {
+                    const raw = Number(r.version_quantity);
+                    const valid = Number.isFinite(raw) && raw > 0 ? raw : null;
+                    qtyByPair.set(`${r.job_id}|${r.version_tag}`, valid);
+                }
+            } catch (e) {
+                if (!isUndefinedTableError(e)) {
+                    console.warn('[getImpositionDetails] qty lookup failed in single_page_files:', e);
+                }
+            }
+        }
+
         return {
             imposition_id: impositionId,
             file_ids: fileIds,
-            ...configResult.rows[0],
+            ...(configResult.rows[0] ?? {}),
         };
-    }, (row) => row === null);
+    });
 }
 
 // Get all file_ids for an imposition_id
 export async function getFileIds(impositionId: string): Promise<string[]> {
-    return withPlannerAppThenLogsOnEmpty(async (client) => {
+    return withImpositionFileMappingClient(async (client) => {
         const result = await client.query(
             `
             SELECT file_id
@@ -145,13 +212,62 @@ export async function getFileIds(impositionId: string): Promise<string[]> {
             [impositionId]
         );
 
-        return result.rows.map((row) => row.file_id);
-    }, (ids) => ids.length === 0);
+        const fileIds = result.rows.map((row) => row.file_id as string);
+
+        const parsedPairs = fileIds
+            .map((id) => ({ fileId: id, parsed: parseLabexFileIdForQty(id) }))
+            .filter((x): x is { fileId: string; parsed: { jobId: string; versionTag: string } } => x.parsed !== null);
+
+        const uniquePairs: Array<{ jobId: string; versionTag: string }> = [];
+        const seen = new Set<string>();
+        for (const row of parsedPairs) {
+            const key = `${row.parsed.jobId}|${row.parsed.versionTag}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            uniquePairs.push(row.parsed);
+        }
+
+        const qtyByPair = new Map<string, number | null>();
+        if (uniquePairs.length > 0) {
+            const valuesSql = uniquePairs
+                .map((_, i) => `($${i * 2 + 1}, $${i * 2 + 2})`)
+                .join(', ');
+            const valuesParams = uniquePairs.flatMap((x) => [x.jobId, x.versionTag]);
+            try {
+                const qtyResult = await client.query(
+                    `
+                    SELECT job_id, version_tag, version_quantity
+                    FROM single_page_files
+                    WHERE (job_id, version_tag) IN (${valuesSql})
+                `,
+                    valuesParams
+                );
+                for (const r of qtyResult.rows) {
+                    const raw = Number(r.version_quantity);
+                    const valid = Number.isFinite(raw) && raw > 0 ? raw : null;
+                    qtyByPair.set(`${r.job_id}|${r.version_tag}`, valid);
+                }
+            } catch (e) {
+                if (!isUndefinedTableError(e)) {
+                    console.warn('[getFileIds] qty lookup failed in single_page_files:', e);
+                }
+            }
+        }
+
+        return fileIds.map((fileId) => {
+            const parsed = parseLabexFileIdForQty(fileId);
+            if (!parsed) {
+                return `${fileId} · Qty: N/A`;
+            }
+            const qty = qtyByPair.get(`${parsed.jobId}|${parsed.versionTag}`) ?? null;
+            return `${parsed.jobId}_${parsed.versionTag} · Qty: ${qty == null ? 'N/A' : qty}`;
+        });
+    });
 }
 
 // Resolve runlist_id: runlist match, exact file_id, Labex short form, partial runlist, job_id_version_tag
 export async function findRunlistByScan(scanInput: string): Promise<string | null> {
-    return withPlannerAppThenLogsOnEmpty(async (client) => {
+    return withImpositionFileMappingClient(async (client) => {
         let exactMatch = await client.query(
             `SELECT DISTINCT runlist_id 
              FROM production_planner_paths 
@@ -294,7 +410,7 @@ export async function findRunlistByScan(scanInput: string): Promise<string | nul
         }
 
         return null;
-    }, (id) => id === null);
+    });
 }
 
 // Get production queue filtered by runlist_id
@@ -363,7 +479,7 @@ export async function getProductionQueueByRunlist(runlistId: string): Promise<Pr
 }
 
 export async function getDistinctFileIdsForRunlist(runlistId: string): Promise<{ file_id: string }[]> {
-    return withPlannerAppThenLogsOnEmpty(async (client) => {
+    return withImpositionFileMappingClient(async (client) => {
         const fileIdsResult = await client.query(
             `
                         SELECT DISTINCT ifm.file_id
@@ -375,7 +491,7 @@ export async function getDistinctFileIdsForRunlist(runlistId: string): Promise<{
             [runlistId]
         );
         return fileIdsResult.rows as { file_id: string }[];
-    }, (rows) => rows.length === 0);
+    });
 }
 
 export async function findRunlistIdsMatchingScanFragment(scan: string): Promise<string[]> {
@@ -393,13 +509,13 @@ export async function findRunlistIdsMatchingScanFragment(scan: string): Promise<
 
 /** Resolve imposition when the scan string is an exact file_id (full barcode). */
 export async function findImpositionIdByExactFileId(fileId: string): Promise<string | null> {
-    return withPlannerAppThenLogsOnEmpty(async (client) => {
+    return withImpositionFileMappingClient(async (client) => {
         const r = await client.query(
             `SELECT imposition_id FROM imposition_file_mapping WHERE file_id = $1 LIMIT 1`,
             [fileId.trim()]
         );
         return r.rows.length > 0 ? (r.rows[0].imposition_id as string) : null;
-    }, (id) => id === null);
+    });
 }
 
 /** Short QR like "5475_7066" while DB file_id contains "Labex_5475_7066". */
@@ -408,7 +524,7 @@ export async function findImpositionIdByLabexShortScan(scan: string): Promise<st
     if (!s.includes('_')) {
         return null;
     }
-    return withPlannerAppThenLogsOnEmpty(async (client) => {
+    return withImpositionFileMappingClient(async (client) => {
         const r = await client.query(
             `SELECT DISTINCT imposition_id FROM imposition_file_mapping WHERE file_id LIKE $1 LIMIT 2`,
             [`%Labex_${s}%`]
@@ -422,11 +538,11 @@ export async function findImpositionIdByLabexShortScan(scan: string): Promise<st
             );
         }
         return null;
-    }, (id) => id === null);
+    });
 }
 
 export async function findImpositionIdByFilePattern(filePattern: string): Promise<string | null> {
-    return withPlannerAppThenLogsOnEmpty(async (client) => {
+    return withImpositionFileMappingClient(async (client) => {
         const impositionResult = await client.query(
             `
                         SELECT DISTINCT imposition_id
@@ -439,7 +555,7 @@ export async function findImpositionIdByFilePattern(filePattern: string): Promis
         return impositionResult.rows.length > 0
             ? (impositionResult.rows[0].imposition_id as string)
             : null;
-    }, (id) => id === null);
+    });
 }
 
 const IMPOSITION_IN_RUNLIST = `
@@ -455,7 +571,7 @@ export async function findImpositionIdForScanInRunlist(
     scan: string,
     runlistId: string
 ): Promise<string | null> {
-    return withPlannerAppThenLogsOnEmpty(async (client) => {
+    return withImpositionFileMappingClient(async (client) => {
         const trimmed = scan.trim();
 
         const singleDistinct = async (sql: string, params: unknown[]): Promise<string | null> => {
@@ -498,14 +614,14 @@ export async function findImpositionIdForScanInRunlist(
         }
 
         return null;
-    }, (id) => id === null);
+    });
 }
 
 export async function findSimilarFileIdsForDebug(
     version: string,
     jobId: string
 ): Promise<{ file_id: string; imposition_id: string }[]> {
-    return withPlannerAppThenLogsOnEmpty(async (client) => {
+    return withImpositionFileMappingClient(async (client) => {
         const debugResult = await client.query(
             `
                             SELECT DISTINCT file_id, imposition_id
@@ -516,5 +632,5 @@ export async function findSimilarFileIdsForDebug(
             [`FILE_${version}_Labex_%${jobId}%`, `FILE_%_Labex_${jobId}_%`]
         );
         return debugResult.rows as { file_id: string; imposition_id: string }[];
-    }, (rows) => rows.length === 0);
+    });
 }

@@ -1,17 +1,28 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import ProductionQueueList from '../../components/LeftPanel/ProductionQueueList';
 import ImpositionViewer from '../../components/MiddlePanel/ImpositionViewer';
 import { ProductionQueueItem, ImpositionItem, ImpositionDetails } from '../../types';
+import type { SchedulerMode } from '../../lib/scheduler/machine-routing';
 import {
     fetchProductionQueue,
     fetchImpositionDetails,
     fetchFileIds,
     processScan,
     fetchMachines,
+    fetchSchedulerModes,
+    fetchOperations,
     Machine,
+    type ScanCatalogOperation,
 } from '../../services/api';
 import { Settings, ChevronDown, AlertCircle, X, Package, Hash, FileText } from 'lucide-react';
 import './TicketPage.css';
+
+function catalogOpInMode(op: ScanCatalogOperation, mode: SchedulerMode): boolean {
+    const want = new Set(mode.operationIds.map((x) => x.trim().toLowerCase()));
+    const sched = op.scheduler_operation_id.trim().toLowerCase();
+    const planner = op.planner_operation_id?.trim().toLowerCase();
+    return want.has(sched) || (planner != null && want.has(planner));
+}
 
 export default function TicketPage() {
     const [queue, setQueue] = useState<ProductionQueueItem[]>([]);
@@ -29,6 +40,9 @@ export default function TicketPage() {
     const [machines, setMachines] = useState<Machine[]>([]);
     const [selectedMachineId, setSelectedMachineId] = useState<string>('');
     const [selectedMachine, setSelectedMachine] = useState<Machine | null>(null);
+    const [schedulerModes, setSchedulerModes] = useState<SchedulerMode[]>([]);
+    const [catalogOps, setCatalogOps] = useState<ScanCatalogOperation[]>([]);
+    const [selectedModeId, setSelectedModeId] = useState<string>('');
     const [showSettings, setShowSettings] = useState(true);
     const [notification, setNotification] = useState<{ message: string; type: 'error' | 'success' } | null>(null);
     const [manualScan, setManualScan] = useState('');
@@ -67,6 +81,62 @@ export default function TicketPage() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
+    useEffect(() => {
+        if (!selectedMachineId.trim()) {
+            setSchedulerModes([]);
+            setCatalogOps([]);
+            setSelectedModeId('');
+            return;
+        }
+        let cancelled = false;
+        (async () => {
+            try {
+                const [modes, ops] = await Promise.all([
+                    fetchSchedulerModes(selectedMachineId),
+                    fetchOperations(selectedMachineId),
+                ]);
+                if (!cancelled) {
+                    setSchedulerModes(modes);
+                    setCatalogOps(ops);
+                    setSelectedModeId('');
+                }
+            } catch (err) {
+                console.error('Error loading scan catalog:', err);
+                if (!cancelled) {
+                    setSchedulerModes([]);
+                    setCatalogOps([]);
+                }
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [selectedMachineId]);
+
+    const selectedMode = useMemo(
+        () => schedulerModes.find((m) => m.id === selectedModeId) ?? null,
+        [schedulerModes, selectedModeId]
+    );
+
+    /** Operations implied by the current machine + mode (first match is used for the scan payload). */
+    const operationsForScan = useMemo(() => {
+        if (schedulerModes.length === 0) return catalogOps;
+        if (!selectedMode) return [];
+        return catalogOps.filter((op) => catalogOpInMode(op, selectedMode));
+    }, [catalogOps, schedulerModes.length, selectedMode]);
+
+    const primaryOperationForScan = useMemo(
+        () => operationsForScan[0] ?? null,
+        [operationsForScan]
+    );
+
+    const resolveScanPayloadOperationId = useCallback((): string | null => {
+        const op = primaryOperationForScan;
+        if (!op) return null;
+        const planner = op.planner_operation_id?.trim();
+        return planner || op.scheduler_operation_id;
+    }, [primaryOperationForScan]);
+
     const processScanValue = useCallback(async (scanValue: string): Promise<boolean> => {
         if (!scanValue.trim() || isScanning) {
             return false;
@@ -80,6 +150,23 @@ export default function TicketPage() {
             return false;
         }
 
+        if (schedulerModes.length > 0 && !selectedModeId.trim()) {
+            setNotification({
+                message: 'Select a mode before scanning',
+                type: 'error',
+            });
+            return false;
+        }
+
+        const payloadOpId = resolveScanPayloadOperationId();
+        if (!payloadOpId) {
+            setNotification({
+                message: 'No operation available for this machine or mode',
+                type: 'error',
+            });
+            return false;
+        }
+
         try {
             setIsScanning(true);
             setError(null);
@@ -88,7 +175,7 @@ export default function TicketPage() {
             const { runlistId, queue: filteredQueue, scannedImpositionId } = await processScan(
                 scanValue,
                 selectedMachineId || null,
-                null
+                [payloadOpId]
             );
 
             setQueue(filteredQueue);
@@ -133,7 +220,13 @@ export default function TicketPage() {
         } finally {
             setIsScanning(false);
         }
-    }, [isScanning, selectedMachineId]);
+    }, [
+        isScanning,
+        selectedMachineId,
+        schedulerModes.length,
+        selectedModeId,
+        resolveScanPayloadOperationId,
+    ]);
 
     useEffect(() => {
         const handleGlobalKeyDown = (e: KeyboardEvent) => {
@@ -239,7 +332,7 @@ export default function TicketPage() {
                 fetchFileIds(impositionId),
             ]);
             setImpositionDetails(details);
-            setFileIds(details?.file_ids || ids);
+            setFileIds(ids.length > 0 ? ids : (details?.file_ids || []));
         } catch (err) {
             console.error('Error loading imposition details:', err);
             setImpositionDetails(null);
@@ -413,16 +506,47 @@ export default function TicketPage() {
                                         </option>
                                     ))}
                                 </select>
-                                {selectedMachine && (
-                                    <p
-                                        style={{
-                                            margin: 'var(--spacing-sm) 0 0',
-                                            fontSize: '0.75rem',
-                                            color: 'var(--text-secondary)',
-                                        }}
-                                    >
-                                        Scans are recorded for this machine only (no operation selection).
-                                    </p>
+                                {selectedMachine && schedulerModes.length > 0 && (
+                                    <>
+                                        <label
+                                            style={{
+                                                display: 'block',
+                                                marginTop: 'var(--spacing-md)',
+                                                marginBottom: 'var(--spacing-xs)',
+                                                fontSize: '0.8125rem',
+                                                color: 'var(--text-secondary)',
+                                                fontWeight: 500,
+                                            }}
+                                        >
+                                            Mode
+                                        </label>
+                                        <select
+                                            value={selectedModeId}
+                                            onChange={(e) => {
+                                                setSelectedModeId(e.target.value);
+                                            }}
+                                            onClick={(ev) => ev.stopPropagation()}
+                                            style={{
+                                                width: '100%',
+                                                padding: 'var(--spacing-sm) var(--spacing-md)',
+                                                background: 'var(--bg-tertiary)',
+                                                border: '1px solid var(--border-color)',
+                                                borderRadius: 'var(--radius-sm)',
+                                                color: 'var(--text-primary)',
+                                                fontSize: '0.875rem',
+                                                cursor: 'pointer',
+                                                zIndex: 10,
+                                                pointerEvents: 'auto',
+                                            }}
+                                        >
+                                            <option value="">Select mode ({schedulerModes.length} available)</option>
+                                            {schedulerModes.map((mode) => (
+                                                <option key={mode.id} value={mode.id}>
+                                                    {mode.name}
+                                                </option>
+                                            ))}
+                                        </select>
+                                    </>
                                 )}
                             </div>
                         </div>
