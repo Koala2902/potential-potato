@@ -1,0 +1,8 @@
+{
+  "name": "legacy-operation-view",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "dev": "python3 -m http.server 5174"
+  }
+}

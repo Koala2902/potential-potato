@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Legacy Operation Scanner</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <main class="container">
+    <h1>Legacy Operation Scanner</h1>
+    <p class="hint">
+      Minimal scanner page for older devices. Uses the same backend scan API.
+    </p>
+
+    <div class="layout">
+      <aside class="left-column">
+        <section class="panel">
+          <button id="settingsToggleBtn" type="button" class="settings-toggle" aria-expanded="false">
+            Show API/Port Settings
+          </button>
+          <div id="settingsPanel" class="hidden">
+            <label for="apiBaseInput">API Base URL</label>
+            <input id="apiBaseInput" type="text" />
+            <small class="muted">Default is this host on port 3001, example: http://10.1.1.64:3001/api</small>
+          </div>
+        </section>
+
+        <section class="panel">
+          <label for="machineSelect">Machine</label>
+          <select id="machineSelect">
+            <option value="">Loading machines...</option>
+          </select>
+
+          <div id="modeWrap" class="hidden">
+            <label for="modeSelect">Mode</label>
+            <select id="modeSelect">
+              <option value="">Select mode</option>
+            </select>
+          </div>
+        </section>
+
+        <section class="panel">
+          <form id="scanForm">
+            <label for="scanInput">Scan Code</label>
+            <div class="row">
+              <input id="scanInput" type="text" autocomplete="off" placeholder="Scan or type code" />
+              <button id="submitBtn" type="submit">Submit</button>
+            </div>
+          </form>
+        </section>
+      </aside>
+
+      <section class="panel right-column">
+        <p id="statusText" class="status">Ready.</p>
+        <pre id="resultBox" class="result"></pre>
+      </section>
+    </div>
+  </main>
+
+  <script src="./main.js"></script>
+</body>
+</html>
