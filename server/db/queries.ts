@@ -10,6 +10,7 @@ import {
     labexJobIdSegmentPattern,
     parseJobIdVersionTagScan,
 } from './scan-job-version.js';
+import { getPrintOsPool } from './print-os-pool.js';
 
 export interface ProductionQueueItem {
     runlist_id: string;
@@ -29,13 +30,30 @@ export interface ImpositionDetails {
     [key: string]: any;
 }
 
+function normalizeLooseId(value: string): string {
+    return value.toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function canonicalJobIdForMatching(jobId: string): string {
+    const parts = jobId.trim().split('_').filter(Boolean);
+    if (parts.length >= 3 && parts.every((p) => /^\d+$/.test(p))) {
+        return `${parts[0]}_${parts[1]}`;
+    }
+    return jobId.trim();
+}
+
+function getOrderPrefixFromJobId(jobId: string): string | null {
+    const m = jobId.trim().match(/(\d{4})/);
+    return m ? m[1] : null;
+}
+
 function parseLabexFileIdForQty(fileId: string): { jobId: string; versionTag: string } | null {
     if (!fileId.toLowerCase().includes('labex')) return null;
     const m = fileId.match(/^FILE_(\d+)_Labex_(.+)$/);
     if (!m) {
-        const simple = fileId.match(/^Labex_(\d+_\d+)(?:_|$)/i);
+        const simple = fileId.match(/^Labex_(\d+_\d+)(?:_(\d+))?(?:_|$)/i);
         if (simple) {
-            return { jobId: simple[1]!, versionTag: '1' };
+            return { jobId: simple[1]!, versionTag: simple[2] || '1' };
         }
         return null;
     }
@@ -191,10 +209,80 @@ export async function getImpositionDetails(impositionId: string): Promise<Imposi
             }
         }
 
+        let notesExplanation: string | null = null;
+        if (uniquePairs.length > 0) {
+            const normalizedJobIds = Array.from(
+                new Set(
+                    uniquePairs.flatMap((x) => {
+                        const canonical = canonicalJobIdForMatching(x.jobId);
+                        const compositeWithVersion = `${x.jobId}_${x.versionTag}`;
+                        const canonicalWithVersion = `${canonical}_${x.versionTag}`;
+                        const labexJobId = `Labex_${x.jobId}`;
+                        const labexCanonicalJobId = `Labex_${canonical}`;
+                        return [
+                            normalizeLooseId(x.jobId),
+                            normalizeLooseId(canonical),
+                            normalizeLooseId(compositeWithVersion),
+                            normalizeLooseId(canonicalWithVersion),
+                            normalizeLooseId(labexJobId),
+                            normalizeLooseId(labexCanonicalJobId),
+                        ];
+                    })
+                )
+            ).filter(Boolean);
+
+            if (normalizedJobIds.length > 0) {
+                const notesClient = await getPrintOsPool().connect();
+                try {
+                    const notesResult = await notesClient.query(
+                        `
+                        SELECT
+                            j.job_id,
+                            j.notes
+                        FROM public.jobs j
+                        WHERE j.notes IS NOT NULL
+                          AND NULLIF(BTRIM(j.notes), '') IS NOT NULL
+                          AND regexp_replace(lower(j.job_id), '[^a-z0-9]+', '', 'g') = ANY($1::text[])
+                        ORDER BY j.job_id
+                    `,
+                        [normalizedJobIds]
+                    );
+
+                    const orderToNotes = new Map<string, string>();
+                    for (const row of notesResult.rows) {
+                        const jobId = String(row.job_id ?? '').trim();
+                        const note = String(row.notes ?? '').trim();
+                        if (!jobId || !note) continue;
+                        const orderPrefix = getOrderPrefixFromJobId(jobId);
+                        if (!orderPrefix || orderToNotes.has(orderPrefix)) continue;
+                        orderToNotes.set(orderPrefix, note);
+                    }
+
+                    if (orderToNotes.size > 0) {
+                        notesExplanation = Array.from(orderToNotes.entries())
+                            .sort(([a], [b]) => a.localeCompare(b))
+                            .map(([orderPrefix, note]) => `${orderPrefix}: ${note}`)
+                            .join('\n');
+                    }
+                } catch (e) {
+                    if (!isUndefinedTableError(e)) {
+                        console.warn('[getImpositionDetails] notes lookup failed in public.jobs:', e);
+                    }
+                } finally {
+                    notesClient.release();
+                }
+            }
+        }
+
+        const existingExplanation = configResult.rows[0]?.explanation;
+
         return {
             imposition_id: impositionId,
             file_ids: fileIds,
             ...(configResult.rows[0] ?? {}),
+            explanation:
+                notesExplanation ??
+                (typeof existingExplanation === 'string' ? existingExplanation : null),
         };
     });
 }
@@ -254,13 +342,85 @@ export async function getFileIds(impositionId: string): Promise<string[]> {
             }
         }
 
+        const jobMetaByNormalizedId = new Map<string, { cores: string; rollDirection: string }>();
+        if (uniquePairs.length > 0) {
+            const normalizedJobIds = Array.from(
+                new Set(
+                    uniquePairs.flatMap((x) => {
+                        const canonical = canonicalJobIdForMatching(x.jobId);
+                        const compositeWithVersion = `${x.jobId}_${x.versionTag}`;
+                        const canonicalWithVersion = `${canonical}_${x.versionTag}`;
+                        const labexJobId = `Labex_${x.jobId}`;
+                        const labexCanonicalJobId = `Labex_${canonical}`;
+                        return [
+                            normalizeLooseId(x.jobId),
+                            normalizeLooseId(canonical),
+                            normalizeLooseId(compositeWithVersion),
+                            normalizeLooseId(canonicalWithVersion),
+                            normalizeLooseId(labexJobId),
+                            normalizeLooseId(labexCanonicalJobId),
+                        ];
+                    })
+                )
+            ).filter(Boolean);
+
+            if (normalizedJobIds.length > 0) {
+                const jobsClient = await getPrintOsPool().connect();
+                try {
+                    const jobsResult = await jobsClient.query(
+                        `
+                        SELECT
+                            j.job_id,
+                            j.cores,
+                            j.roll_direction
+                        FROM public.jobs j
+                        WHERE regexp_replace(lower(j.job_id), '[^a-z0-9]+', '', 'g') = ANY($1::text[])
+                    `,
+                        [normalizedJobIds]
+                    );
+
+                    for (const row of jobsResult.rows) {
+                        const rawJobId = String(row.job_id ?? '').trim();
+                        if (!rawJobId) continue;
+                        const normalized = normalizeLooseId(rawJobId);
+                        const rawWithoutLabexPrefix = rawJobId.replace(/^Labex_/i, '').trim();
+                        const normalizedWithoutLabexPrefix = normalizeLooseId(rawWithoutLabexPrefix);
+                        const cores = String(row.cores ?? '').trim();
+                        const rollDirection = String(row.roll_direction ?? '').trim();
+                        const meta = { cores, rollDirection };
+                        if (!jobMetaByNormalizedId.has(normalized)) {
+                            jobMetaByNormalizedId.set(normalized, meta);
+                        }
+                        if (normalizedWithoutLabexPrefix && !jobMetaByNormalizedId.has(normalizedWithoutLabexPrefix)) {
+                            jobMetaByNormalizedId.set(normalizedWithoutLabexPrefix, meta);
+                        }
+                    }
+                } catch (e) {
+                    if (!isUndefinedTableError(e)) {
+                        console.warn('[getFileIds] jobs roll/core lookup failed in public.jobs:', e);
+                    }
+                } finally {
+                    jobsClient.release();
+                }
+            }
+        }
+
         return fileIds.map((fileId) => {
             const parsed = parseLabexFileIdForQty(fileId);
             if (!parsed) {
-                return `${fileId} · Qty: N/A`;
+                return `${fileId} · Qty: `;
             }
             const qty = qtyByPair.get(`${parsed.jobId}|${parsed.versionTag}`) ?? null;
-            return `${parsed.jobId}_${parsed.versionTag} · Qty: ${qty == null ? 'N/A' : qty}`;
+            const normalized = normalizeLooseId(parsed.jobId);
+            const canonicalNormalized = normalizeLooseId(canonicalJobIdForMatching(parsed.jobId));
+            const meta =
+                jobMetaByNormalizedId.get(normalized) ||
+                jobMetaByNormalizedId.get(canonicalNormalized);
+            const qtyText = qty == null ? '' : String(qty);
+            const coresText = meta?.cores ?? '';
+            const rollDirectionText = meta?.rollDirection ?? '';
+            const suffix = [qtyText, coresText, rollDirectionText].filter((x) => x.length > 0).join('_');
+            return `${parsed.jobId}_${parsed.versionTag} · Qty: ${suffix}`;
         });
     });
 }

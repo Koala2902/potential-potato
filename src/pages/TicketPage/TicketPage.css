@@ -116,9 +116,9 @@
 }
 
 .ticket-page__fileids-scroll {
-    max-height: min(40vh, 260px);
-    overflow-y: auto;
-    min-height: 0;
-    padding-right: var(--spacing-xs);
+    max-height: none;
+    overflow: visible;
+    min-height: auto;
+    padding-right: 0;
 }
 
