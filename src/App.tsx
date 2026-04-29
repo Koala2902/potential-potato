@@ -5,9 +5,10 @@ import ProductionPage from './pages/ProductionPage/ProductionPage';
 import { Scan } from 'lucide-react';
 import SchedulerPage from './pages/SchedulerPage/SchedulerPage';
 import ConfigPage from './pages/ConfigPage/ConfigPage';
+import JobPage from './pages/JobPage/JobPage';
 import './App.css';
 
-type Page = 'operation' | 'production' | 'schedule' | 'config';
+type Page = 'operation' | 'production' | 'schedule' | 'job' | 'config';
 
 function App() {
     const [currentPage, setCurrentPage] = useState<Page>('operation');
@@ -37,6 +38,7 @@ function App() {
                 {currentPage === 'operation' && <TicketPage />}
                 {currentPage === 'production' && <ProductionPage />}
                 {currentPage === 'schedule' && <SchedulerPage />}
+                {currentPage === 'job' && <JobPage />}
                 {currentPage === 'config' && <ConfigPage />}
             </main>
         </div>

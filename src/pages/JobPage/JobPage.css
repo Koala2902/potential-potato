@@ -1,0 +1,180 @@
+.job-page {
+  width: 100%;
+  padding: var(--spacing-md);
+  color: var(--text-primary);
+  box-sizing: border-box;
+}
+
+.job-page__banner {
+  padding: var(--spacing-md);
+  border-radius: var(--radius-md);
+  margin-bottom: var(--spacing-md);
+}
+
+.job-page__banner--error {
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  color: #fecaca;
+}
+
+.job-page__loading {
+  color: var(--text-secondary);
+}
+
+.job-page__controls {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  margin-bottom: var(--spacing-md);
+}
+
+.job-page__controls label {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.job-page__controls select {
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  padding: 4px 8px;
+}
+
+.job-page__board {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(220px, 1fr));
+  gap: var(--spacing-md);
+}
+
+.job-page__lane {
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  background: var(--bg-secondary);
+  min-height: 24rem;
+  display: flex;
+  flex-direction: column;
+}
+
+.job-page__lane--drop-target {
+  box-shadow: inset 0 0 0 2px rgba(34, 197, 94, 0.55);
+  background: rgba(34, 197, 94, 0.06);
+}
+
+.job-page__lane-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.job-page__lane-header h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.job-page__lane-header span {
+  font-size: 0.75rem;
+  color: var(--text-tertiary);
+}
+
+.job-page__cards {
+  list-style: none;
+  margin: 0;
+  padding: var(--spacing-sm);
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--spacing-sm);
+}
+
+.job-page__group {
+  list-style: none;
+}
+
+.job-page__group-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border: 0;
+  background: transparent;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  margin: 0 0 6px;
+  padding: 0 2px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.job-page__group-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-page__group-circle {
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.62rem;
+  font-weight: 600;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.job-page__group-jobs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--spacing-xs);
+}
+
+.job-page__card {
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 6px 8px;
+  background: var(--bg-tertiary);
+  cursor: grab;
+}
+
+.job-page__card--dragging {
+  opacity: 0.5;
+}
+
+.job-page__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.job-page__job-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 0.76rem;
+  margin-bottom: 2px;
+}
+
+.job-page__versions {
+  font-size: 0.68rem;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+.job-page__meta {
+  display: flex;
+  justify-content: flex-end;
+  font-size: 0.68rem;
+  color: var(--text-secondary);
+  line-height: 1.1;
+}

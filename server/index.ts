@@ -17,13 +17,25 @@ import {
     getMachines,
     getAvailableOperations,
     getMachineModes,
+    getSchedulerModesForMachine,
+    getMachineIdForPlannerOperations,
     recordScannedCode,
     recordRunlistScans,
     getJobs,
 } from './db/jobmanager-queries.js';
-import { processPrintOSRecords, processScannedCodes } from './db/status-updates.js';
+import {
+    processPrintOSRecords,
+    processScannedCodes,
+    enrichProductionStatusWithSourceTables,
+    mergeProductionStatusGroupsByCanonicalMachineId,
+    backfillLegacyIndigoMachineIdsOnLogs,
+} from './db/status-updates.js';
+import { getPrintOsDatabaseUrl } from './db/database-config.js';
 import logsPool from './db/connection.js';
 import { appPool } from './db/app-connection.js';
+import { plannerUrlsDiffer } from './db/planner-client.js';
+import { PRODUCTION_COMPLETED_JOBS_PER_MACHINE } from './db/production-status-limits.js';
+import { canonicalCompositeJobIdForDisplay } from './db/scan-job-version.js';
 import { isUndefinedTableError } from './db/pg-errors.js';
 import { schedulerRouter } from './scheduler-api.js';
 
@@ -73,6 +85,11 @@ console.log('Starting server...');
 console.log(`Port: ${PORT}`);
 console.log('Logs DB: configured via LOGS_DATABASE_URL or LOGS_DB_*');
 console.log('App DB: configured via DATABASE_URL or APP_DB_*');
+console.log(
+    getPrintOsDatabaseUrl()
+        ? `Print OS ("print OS" table): JOBMANAGER_DATABASE_URL → jobmanager (or dedicated URL)`
+        : `Print OS: same as App DB (set JOBMANAGER_DATABASE_URL if "print OS" is on database jobmanager)`
+);
 console.log(`PDF archive: ${PDF_ARCHIVE_PATH} (flat + year subfolders: ${pdfYearSubfoldersToTry().join(', ') || 'off'})`);
 if (!fs.existsSync(PDF_ARCHIVE_PATH)) {
     console.warn(
@@ -104,6 +121,7 @@ app.get('/', (req, res) => {
             machines: '/api/machines',
             operations: '/api/operations?machineId=:machineId',
             machineModes: '/api/machine-modes?machineId=:machineId',
+            schedulerModes: '/api/scheduler-modes?machineId=:machineId',
             scan: '/api/scan (POST)',
             scannedCodes: '/api/scanned-codes (POST)',
             jobs: '/api/jobs?status=print_ready&limit=100',
@@ -229,7 +247,7 @@ app.get('/api/operations', async (req, res) => {
     }
 });
 
-// Preset operation bundles per machine (optional; empty → Ticket uses per-operation checkboxes only)
+// Preset operation bundles per machine (optional; legacy `machine_modes` table)
 app.get('/api/machine-modes', async (req, res) => {
     try {
         const { machineId } = req.query;
@@ -241,21 +259,39 @@ app.get('/api/machine-modes', async (req, res) => {
     }
 });
 
+// Scheduler config modes (`Machine.constants.schedulerModes`) — Ticket scan UI
+app.get('/api/scheduler-modes', async (req, res) => {
+    try {
+        const { machineId } = req.query;
+        const modes = await getSchedulerModesForMachine(machineId as string | undefined);
+        res.json(modes);
+    } catch (error) {
+        console.error('Error fetching scheduler modes:', error);
+        res.status(500).json({ error: 'Failed to fetch scheduler modes' });
+    }
+});
+
 // Record a scanned code
 app.post('/api/scanned-codes', async (req, res) => {
     try {
-        const { codeText, machineId, userId, operations, metadata } = req.body;
-        
+        const { codeText, machineId, userId, operations, metadata, impositionId } = req.body;
+
         if (!codeText || typeof codeText !== 'string') {
             return res.status(400).json({ error: 'codeText is required' });
         }
+
+        const imp =
+            impositionId != null && typeof impositionId === 'string' && impositionId.trim()
+                ? impositionId.trim()
+                : null;
 
         const scannedCode = await recordScannedCode(
             codeText,
             machineId || null,
             userId || null,
             operations || null,
-            metadata || null
+            metadata || null,
+            imp
         );
         
         // Process the scan immediately (async, don't wait)
@@ -271,7 +307,7 @@ app.post('/api/scanned-codes', async (req, res) => {
 });
 
 // Get production status by machine (last 5 completed + 1 processing per machine)
-// Logs DB: job_operation_duration; app DB: imposition_file_mapping for version counts (merged in JS).
+// Logs DB: job_operation_duration; imposition_file_mapping for version counts (logs pool only; merged in JS).
 app.get('/api/production-status', async (req, res) => {
     try {
         const logsClient = await logsPool.connect();
@@ -287,14 +323,26 @@ app.get('/api/production-status', async (req, res) => {
                         MAX(
                             CASE 
                                 WHEN jod.operation_completed_at IS NOT NULL 
-                                THEN timezone('UTC', jod.operation_completed_at AT TIME ZONE 'Australia/Sydney')
+                                THEN (
+                                    CASE WHEN jod.operation_id = 'op001' THEN
+                                        jod.operation_completed_at AT TIME ZONE 'Australia/Sydney'
+                                    ELSE
+                                        jod.operation_completed_at AT TIME ZONE 'UTC'
+                                    END
+                                )
                                 ELSE NULL
                             END
                         ) as last_completed_at,
                         MAX(
                             CASE 
                                 WHEN jod.operation_started_at IS NOT NULL 
-                                THEN timezone('UTC', jod.operation_started_at AT TIME ZONE 'Australia/Sydney')
+                                THEN (
+                                    CASE WHEN jod.operation_id = 'op001' THEN
+                                        jod.operation_started_at AT TIME ZONE 'Australia/Sydney'
+                                    ELSE
+                                        jod.operation_started_at AT TIME ZONE 'UTC'
+                                    END
+                                )
                                 ELSE NULL
                             END
                         ) as last_started_at,
@@ -347,7 +395,7 @@ app.get('/api/production-status', async (req, res) => {
                     operation_id,
                     duration_seconds
                 FROM completed_jobs
-                WHERE rn <= 5
+                WHERE rn <= ${PRODUCTION_COMPLETED_JOBS_PER_MACHINE}
                 
                 UNION ALL
                 
@@ -375,13 +423,29 @@ app.get('/api/production-status', async (req, res) => {
                 throw e;
             }
 
-            const rows = result.rows as any[];
+            let rows = result.rows as any[];
+            /** Merge duplicate SQL groups after normalizing legacy `5516_7121_1` → `5516_7121`. */
+            const byKey = new Map<string, (typeof rows)[0]>();
+            for (const row of rows) {
+                const jid = canonicalCompositeJobIdForDisplay(row.job_id);
+                const key = `${row.status_type}|${row.machine_id}|${jid}`;
+                const prev = byKey.get(key);
+                if (!prev) {
+                    byKey.set(key, { ...row, job_id: jid });
+                } else {
+                    const tPrev = new Date(prev.last_completed_at).getTime();
+                    const tNew = new Date(row.last_completed_at).getTime();
+                    const best = tNew >= tPrev ? row : prev;
+                    byKey.set(key, { ...best, job_id: jid });
+                }
+            }
+            rows = Array.from(byKey.values());
             const jobIds = [...new Set(rows.map((r) => r.job_id))];
             if (jobIds.length > 0) {
-                const appClient = await appPool.connect();
+                const ifmClient = await logsPool.connect();
                 try {
                     try {
-                        const tvResult = await appClient.query(
+                        const tvResult = await ifmClient.query(
                             `SELECT j.job_id, (
                             SELECT COUNT(DISTINCT 
                                 SPLIT_PART(SPLIT_PART(ifm.file_id, '_', 2), '_', 1)
@@ -405,14 +469,14 @@ app.get('/api/production-status', async (req, res) => {
                     } catch (e) {
                         if (isUndefinedTableError(e)) {
                             console.warn(
-                                '[production-status] imposition_file_mapping missing on app DB — run migrations. Using processed_versions as total_versions.'
+                                '[production-status] imposition_file_mapping missing on logs DB — Using processed_versions as total_versions.'
                             );
                         } else {
                             throw e;
                         }
                     }
                 } finally {
-                    appClient.release();
+                    ifmClient.release();
                 }
             }
             
@@ -436,9 +500,8 @@ app.get('/api/production-status', async (req, res) => {
                     ? Math.round((row.processed_versions / row.total_versions) * 100)
                     : 100;
                 
-                // Convert timestamptz to ISO string for proper timezone handling in frontend
-                // The timestamp from the query is already converted to UTC (timestamptz)
-                // So we just need to convert it to ISO string
+                // Query returns timestamptz (absolute instant). op001 naive = Sydney wall time;
+                // scanner ops (op002+) naive = UTC wall time — see job_operation_duration writers.
                 const lastCompletedAt = row.last_completed_at 
                     ? new Date(row.last_completed_at).toISOString()
                     : null;
@@ -459,7 +522,59 @@ app.get('/api/production-status', async (req, res) => {
                     grouped[row.machine_id].processing.push(jobData);
                 }
             });
-            
+
+            await enrichProductionStatusWithSourceTables(grouped);
+            await mergeProductionStatusGroupsByCanonicalMachineId(grouped);
+
+            const allJobIds = new Set<string>();
+            for (const g of Object.values(grouped)) {
+                for (const j of [...g.completed, ...g.processing]) {
+                    if (j.job_id) allJobIds.add(j.job_id);
+                }
+            }
+            if (allJobIds.size > 0) {
+                const ifmClient2 = await logsPool.connect();
+                try {
+                    try {
+                        const tvResult2 = await ifmClient2.query(
+                            `SELECT j.job_id, (
+                            SELECT COUNT(DISTINCT 
+                                SPLIT_PART(SPLIT_PART(ifm.file_id, '_', 2), '_', 1)
+                            )
+                            FROM imposition_file_mapping ifm
+                            WHERE ifm.file_id LIKE 'FILE\\_%\\_Labex\\_' || j.job_id || '\\_%' ESCAPE '\\'
+                        )::bigint AS total_versions
+                        FROM unnest($1::text[]) AS j(job_id)`,
+                            [Array.from(allJobIds)]
+                        );
+                        const byJob2 = new Map<string, number>();
+                        for (const r of tvResult2.rows) {
+                            byJob2.set(r.job_id, parseInt(r.total_versions, 10) || 0);
+                        }
+                        for (const g of Object.values(grouped)) {
+                            for (const j of [...g.completed, ...g.processing]) {
+                                const n = byJob2.get(j.job_id);
+                                if (n !== undefined && n > 0) {
+                                    j.total_versions = n;
+                                    j.progress =
+                                        n > 0 ? Math.round((j.processed_versions / n) * 100) : 100;
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        if (isUndefinedTableError(e)) {
+                            console.warn(
+                                '[production-status] imposition_file_mapping missing on logs DB — skip total_versions merge after enrich.'
+                            );
+                        } else {
+                            throw e;
+                        }
+                    }
+                } finally {
+                    ifmClient2.release();
+                }
+            }
+
             res.json(Object.values(grouped));
         } finally {
             logsClient.release();
@@ -469,6 +584,66 @@ app.get('/api/production-status', async (req, res) => {
         res.status(500).json({ error: 'Failed to fetch production status', message: error.message });
     }
 });
+
+async function getVersionTagsForJob(jobId: string): Promise<string[]> {
+    const jobOpsPoolForStatus = plannerUrlsDiffer() ? logsPool : appPool;
+    let versionTags: string[] = [];
+
+    const cJobOps = await jobOpsPoolForStatus.connect();
+    try {
+        const jobOpsResult = await cJobOps.query(
+            `
+            SELECT DISTINCT version_tag
+            FROM job_operations
+            WHERE job_id = $1
+            ORDER BY version_tag
+        `,
+            [jobId]
+        );
+        versionTags = jobOpsResult.rows.map((row) => row.version_tag).filter(Boolean);
+    } finally {
+        cJobOps.release();
+    }
+
+    if (versionTags.length === 0) {
+        const cIfm = await logsPool.connect();
+        try {
+            const fileIdsResult = await cIfm.query(
+                `
+                SELECT DISTINCT 
+                    SPLIT_PART(SPLIT_PART(file_id, '_', 2), '_', 1) as version_tag
+                FROM imposition_file_mapping
+                WHERE file_id LIKE $1
+            `,
+                [`FILE_%_Labex_${jobId}_%`]
+            );
+            versionTags = fileIdsResult.rows.map((row) => row.version_tag).filter(Boolean);
+        } finally {
+            cIfm.release();
+        }
+    }
+
+    if (versionTags.length === 0) {
+        const cSc = await logsPool.connect();
+        try {
+            const scannedCodesResult = await cSc.query(
+                `
+                SELECT DISTINCT 
+                    SPLIT_PART(code_text, '_', 3) as version_tag
+                FROM scanned_codes
+                WHERE code_text LIKE $1
+                AND code_text ~ '^\\d+_\\d+_\\d+$'
+            `,
+                [`${jobId}_%`]
+            );
+            versionTags = scannedCodesResult.rows.map((row) => row.version_tag).filter(Boolean);
+        } finally {
+            cSc.release();
+        }
+    }
+
+    return versionTags.length > 0 ? versionTags : ['1'];
+}
 
 // Update runlist status (updates all jobs in the runlist)
 app.put('/api/runlists/:runlistId/status', async (req, res) => {
@@ -485,7 +660,7 @@ app.put('/api/runlists/:runlistId/status', async (req, res) => {
             return res.status(400).json({ error: `Invalid status. Must be one of: ${validStatuses.join(', ')}` });
         }
 
-        const client = await appPool.connect();
+        const client = await logsPool.connect();
         try {
             // Get all job_ids in this runlist
             const runlistJobsResult = await client.query(`
@@ -526,11 +701,12 @@ app.put('/api/runlists/:runlistId/status', async (req, res) => {
                 'print_ready': [],
                 'printed': ['op001'],
                 'digital_cut': ['op002'],
-                'slitter': ['op003'],
+                'slitter': ['op004'],
                 'production_finished': ['op004'],
             };
 
             const requiredOperations = statusToOperations[status];
+            const defaultMachineId = await getMachineIdForPlannerOperations(requiredOperations);
             const scannedCodes = [];
 
             for (const jobId of jobIds) {
@@ -543,7 +719,7 @@ app.put('/api/runlists/:runlistId/status', async (req, res) => {
                     try {
                         const scannedCode = await recordScannedCode(
                             codeText,
-                            null,
+                            defaultMachineId,
                             null,
                             operationsObj,
                             { 
@@ -583,6 +759,59 @@ app.put('/api/runlists/:runlistId/status', async (req, res) => {
     }
 });
 
+// Move job between operation lanes by creating scan-tagged operation completion.
+app.post('/api/jobs/:jobId/move-operation', async (req, res) => {
+    try {
+        const { jobId } = req.params;
+        const { operationId } = req.body;
+        const normalizedOperationId =
+            typeof operationId === 'string' ? operationId.trim().toLowerCase() : '';
+        const allowedOperationIds = ['op001', 'op002', 'op003', 'op004'];
+
+        if (!allowedOperationIds.includes(normalizedOperationId)) {
+            return res.status(400).json({
+                error: `operationId must be one of: ${allowedOperationIds.join(', ')}`,
+            });
+        }
+
+        const requiredOperations = [normalizedOperationId];
+        const versionTags = await getVersionTagsForJob(jobId);
+        const defaultMachineId = await getMachineIdForPlannerOperations(requiredOperations);
+        const scannedCodes = [];
+
+        for (const versionTag of versionTags) {
+            const codeText = `${jobId}_${versionTag}`;
+            const scannedCode = await recordScannedCode(
+                codeText,
+                defaultMachineId,
+                null,
+                { operations: requiredOperations },
+                {
+                    source: 'job_page',
+                    action: 'move_operation',
+                    target_operation_id: normalizedOperationId,
+                    timestamp: new Date().toISOString(),
+                }
+            );
+            scannedCodes.push(scannedCode);
+        }
+
+        const processResult = await processScannedCodes();
+
+        return res.json({
+            success: true,
+            jobId,
+            operationId: normalizedOperationId,
+            scannedCodesCreated: scannedCodes.length,
+            versionTags,
+            processResult,
+        });
+    } catch (error) {
+        console.error('Error moving job operation:', error);
+        return res.status(500).json({ error: 'Failed to move job operation' });
+    }
+});
+
 // Update job status by creating scanned codes for appropriate operations
 app.put('/api/jobs/:jobId/status', async (req, res) => {
     try {
@@ -601,13 +830,13 @@ app.put('/api/jobs/:jobId/status', async (req, res) => {
             return res.status(400).json({ error: `Invalid status. Must be one of: ${validStatuses.join(', ')}` });
         }
 
-        // Map status to operation IDs
-        // Status is determined by operations: op001=printed, op002=digital_cut, op003=slitter, op004=production_finished
+        // Map status to planner operation ids (must match scheduler.Operation.plannerOperationId).
+        // Slitting on slitter_line uses op004; kiss-cut uses op003 (see Config).
         const statusToOperations: Record<string, string[]> = {
             'print_ready': [], // No operations
             'printed': ['op001'],
             'digital_cut': ['op002'],
-            'slitter': ['op003'], // Note: slitter can also be op002+op003, but we'll use op003
+            'slitter': ['op004'],
             'production_finished': ['op004'],
         };
 
@@ -618,59 +847,12 @@ app.put('/api/jobs/:jobId/status', async (req, res) => {
             return res.json({ success: true, jobId, status, note: 'No operations needed for print_ready' });
         }
 
-        const client = await appPool.connect();
-        try {
-            // Get all version_tags for this job from job_operations table (most reliable source)
-            // Also try to get from file_ids as fallback
-            let versionTags: string[] = [];
-            
-            // Method 1: Get from job_operations (most reliable)
-            const jobOpsResult = await client.query(`
-                SELECT DISTINCT version_tag
-                FROM job_operations
-                WHERE job_id = $1
-                ORDER BY version_tag
-            `, [jobId]);
-            
-            versionTags = jobOpsResult.rows.map(row => row.version_tag).filter(Boolean);
-            
-            // Method 2: If no version_tags found in job_operations, try to get from file_ids
-            if (versionTags.length === 0) {
-                console.log(`No version_tags in job_operations for job ${jobId}, trying file_ids...`);
-                const fileIdsResult = await client.query(`
-                    SELECT DISTINCT 
-                        SPLIT_PART(SPLIT_PART(file_id, '_', 2), '_', 1) as version_tag
-                    FROM imposition_file_mapping
-                    WHERE file_id LIKE $1
-                `, [`FILE_%_Labex_${jobId}_%`]);
-                
-                versionTags = fileIdsResult.rows.map(row => row.version_tag).filter(Boolean);
-            }
-            
-            // Method 3: If still no version_tags, try parsing from scanned_codes
-            if (versionTags.length === 0) {
-                console.log(`No version_tags in file_ids for job ${jobId}, trying scanned_codes...`);
-                const scannedCodesResult = await client.query(`
-                    SELECT DISTINCT 
-                        SPLIT_PART(code_text, '_', 3) as version_tag
-                    FROM scanned_codes
-                    WHERE code_text LIKE $1
-                    AND code_text ~ '^\\d+_\\d+_\\d+$'
-                `, [`${jobId}_%`]);
-                
-                versionTags = scannedCodesResult.rows.map(row => row.version_tag).filter(Boolean);
-            }
-
-            if (versionTags.length === 0) {
-                // If still no version_tags, use a default version_tag of "1"
-                console.warn(`No version_tags found for job ${jobId}, using default version_tag "1"`);
-                versionTags = ['1'];
-            }
-            
+            const versionTags = await getVersionTagsForJob(jobId);
             console.log(`Found ${versionTags.length} version_tags for job ${jobId}:`, versionTags);
 
             // Create scanned codes for each version_tag and each required operation
             const { recordScannedCode } = await import('./db/jobmanager-queries.js');
+            const defaultMachineId = await getMachineIdForPlannerOperations(requiredOperations);
             const scannedCodes = [];
 
             for (const versionTag of versionTags) {
@@ -687,7 +869,7 @@ app.put('/api/jobs/:jobId/status', async (req, res) => {
                     // Create scanned code with all required operations at once
                     const scannedCode = await recordScannedCode(
                         codeText,
-                        null, // machineId - not required for status update
+                        defaultMachineId,
                         null, // userId - not required
                         operationsObj, // operations object: { "operations": ["op001", ...] }
                         { 
@@ -714,18 +896,15 @@ app.put('/api/jobs/:jobId/status', async (req, res) => {
                 // Don't fail the request - codes are recorded, they'll be processed later
             }
 
-            res.json({ 
-                success: true, 
-                jobId, 
+            res.json({
+                success: true,
+                jobId,
                 status,
                 scannedCodesCreated: scannedCodes.length,
                 versionTagsProcessed: versionTags.length,
                 versionTags: versionTags,
-                processResult: processResult
+                processResult: processResult,
             });
-        } finally {
-            client.release();
-        }
     } catch (error) {
         console.error('Error updating job status:', error);
         res.status(500).json({ error: 'Failed to update job status' });
@@ -747,7 +926,12 @@ app.get('/api/jobs', async (req, res) => {
             hasSlitter,
             dateFrom,
             dateTo,
-            limit
+            limit,
+            offset,
+            markerLatestCompletedAt,
+            markerJobId,
+            sort,
+            includeRunlist,
         } = req.query;
 
         const filters: any = {};
@@ -768,6 +952,22 @@ app.get('/api/jobs', async (req, res) => {
             if (!isNaN(limitNum) && limitNum > 0) {
                 filters.limit = limitNum;
             }
+        }
+        if (offset) {
+            const offsetNum = parseInt(offset as string, 10);
+            if (!isNaN(offsetNum) && offsetNum >= 0) {
+                filters.offset = offsetNum;
+            }
+        }
+        if (markerLatestCompletedAt) filters.markerLatestCompletedAt = markerLatestCompletedAt as string;
+        if (markerJobId) filters.markerJobId = markerJobId as string;
+        if (sort === 'none' || sort === 'latest') {
+            filters.sort = sort as 'none' | 'latest';
+        }
+        if (includeRunlist === 'false') {
+            filters.includeRunlist = false;
+        } else if (includeRunlist === 'true') {
+            filters.includeRunlist = true;
         }
 
         const jobs = await getJobs(filters);
@@ -833,7 +1033,20 @@ app.post('/api/scan', async (req, res) => {
         
         // Determine if this is a runlist scan or a file_id scan
         const isRunlistDirectScan = runlistId && scan === runlistId;
-        
+
+        /** Resolve imposition for this scan + runlist (embedded in code_text when recording; UI preview). */
+        let scannedImpositionId: string | null = null;
+        if (runlistId && !isRunlistDirectScan) {
+            try {
+                scannedImpositionId = await findImpositionIdForScanInRunlist(scan, runlistId);
+                if (scannedImpositionId) {
+                    warnIfPdfMissing(scannedImpositionId);
+                }
+            } catch (err) {
+                console.error(`[POST /api/scan] Error finding imposition_id:`, err);
+            }
+        }
+
         // Record scan to scanned_codes when machineId is set (operations optional)
         let recordedScans: any[] = [];
         if (machineId && typeof machineId === 'string' && machineId.trim()) {
@@ -851,10 +1064,10 @@ app.post('/api/scan', async (req, res) => {
                         opsPayload,
                         { timestamp: new Date().toISOString() }
                     );
-                    recordedScans = scans.map(s => ({
+                    recordedScans = scans.map((s) => ({
                         scan_id: s.scan_id,
                         code_text: s.code_text,
-                        scanned_at: s.scanned_at
+                        scanned_at: s.scanned_at,
                     }));
                 } else {
                     const scannedCode = await recordScannedCode(
@@ -862,13 +1075,16 @@ app.post('/api/scan', async (req, res) => {
                         machineId,
                         userId || null,
                         opsPayload,
-                        { timestamp: new Date().toISOString() }
+                        { timestamp: new Date().toISOString() },
+                        scannedImpositionId
                     );
-                    recordedScans = [{
-                        scan_id: scannedCode.scan_id,
-                        code_text: scannedCode.code_text,
-                        scanned_at: scannedCode.scanned_at
-                    }];
+                    recordedScans = [
+                        {
+                            scan_id: scannedCode.scan_id,
+                            code_text: scannedCode.code_text,
+                            scanned_at: scannedCode.scanned_at,
+                        },
+                    ];
                 }
 
                 // Process the scan immediately when operations were sent (job pipeline); otherwise audit-only
@@ -904,20 +1120,7 @@ app.post('/api/scan', async (req, res) => {
 
         // Get production queue for this runlist (show all impositions)
         const queue = await getProductionQueueByRunlist(runlistId);
-        
-        // Imposition for preview: must belong to this runlist (same matching rules as findRunlistByScan)
-        let scannedImpositionId: string | null = null;
-        if (!isRunlistDirectScan && queue.length > 0) {
-            try {
-                scannedImpositionId = await findImpositionIdForScanInRunlist(scan, runlistId);
-                if (scannedImpositionId) {
-                    warnIfPdfMissing(scannedImpositionId);
-                }
-            } catch (err) {
-                console.error(`[POST /api/scan] Error finding imposition_id:`, err);
-            }
-        }
-        
+
         res.json({ 
             runlistId, 
             queue,
@@ -1079,8 +1282,22 @@ app.post('/api/process-status-updates', async (req, res) => {
     }
 });
 
-// Start scheduled processing (every 15 minutes)
+// Start scheduled processing (full: Print OS + scanned codes every 15 minutes; Print OS-only every 2 minutes)
 let processingInterval: NodeJS.Timeout | null = null;
+let printOsOnlyInterval: NodeJS.Timeout | null = null;
+
+async function runPrintOsOnly() {
+    try {
+        const printOSResult = await processPrintOSRecords();
+        if (printOSResult.processed > 0 || printOSResult.errors.length > 0) {
+            console.log(
+                `[PRINT_OS_POLL] processed ${printOSResult.processed}, jobs ${printOSResult.jobsUpdated}, errors ${printOSResult.errors.length}`
+            );
+        }
+    } catch (error: any) {
+        console.error('[PRINT_OS_POLL]', error.message);
+    }
+}
 
 async function runProcessing() {
     console.log('\n[PROCESSING] Starting status update processing...');
@@ -1107,18 +1324,27 @@ async function runProcessing() {
 }
 
 function startScheduledProcessing() {
+    backfillLegacyIndigoMachineIdsOnLogs().catch((err) =>
+        console.warn('[server] Indigo machine_id backfill:', err?.message || err)
+    );
+
     // Run immediately on startup
     runProcessing();
-    
-    // Clear any existing interval
+    runPrintOsOnly();
+
     if (processingInterval) {
         clearInterval(processingInterval);
     }
+    processingInterval = setInterval(runProcessing, 15 * 60 * 1000);
 
-    // Process every 15 minutes (900000 ms)
-    processingInterval = setInterval(runProcessing, 15 * 60 * 1000); // 15 minutes
+    if (printOsOnlyInterval) {
+        clearInterval(printOsOnlyInterval);
+    }
+    printOsOnlyInterval = setInterval(runPrintOsOnly, 2 * 60 * 1000);
 
-    console.log('✅ Scheduled processing started (runs immediately, then every 15 minutes)');
+    console.log(
+        '✅ Scheduled processing: full sync every 15m; Print OS poll every 2m (plus on startup)'
+    );
 }
 
 const httpServer = app.listen(PORT, () => {

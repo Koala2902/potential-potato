@@ -97,3 +97,17 @@ export interface ImpositionFileItem {
     file_id: string;
     qty: number | null;
 }
+
+export type JobOperationLane = 'op001' | 'op002' | 'op003' | 'op004';
+
+export interface JobStatusRow {
+    job_id: string;
+    total_versions: number;
+    completed_versions: number;
+    version_tags: string[];
+    status: string;
+    latest_completed_operation_id: string | null;
+    created_at: string | null;
+    updated_at: string | null;
+    runlist_id: string | null;
+}

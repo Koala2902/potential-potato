@@ -3,6 +3,11 @@ import logsPool from './connection.js';
 import { isDedicatedLogsDatabase } from './database-config.js';
 import { isUndefinedTableError } from './pg-errors.js';
 import { prisma } from './prisma.js';
+import {
+    parseSchedulerModes,
+    type SchedulerMode,
+} from '../../src/lib/scheduler/machine-routing.ts';
+import { encodeScanCodeTextWithImposition } from './scan-code-text.js';
 
 /** job_operations + job_status_* views: logs pool when LOGS_DATABASE_URL ≠ DATABASE_URL. */
 function poolForJobPipelineViews(): typeof appPool {
@@ -11,7 +16,7 @@ function poolForJobPipelineViews(): typeof appPool {
 
 /**
  * Scan pipeline contract: `scanned_codes.operations` JSONB uses `{ "operations": ["op001", ...] }`
- * with lowercase op### ids matching `scheduler.Operation.id` on the app DB (canonical catalog).
+ * with lowercase op### ids matching `scheduler.Operation.id` or `plannerOperationId` (column `operation_id`).
  */
 export function normalizeOperationsPayloadForStorage(
     operations: Record<string, any> | null | undefined
@@ -35,9 +40,8 @@ export function normalizeOperationsPayloadForStorage(
     };
 }
 
-// Import parseFileId function to extract job_id and version_tag from file_id
-// We'll need to duplicate the function here or import it
-function parseFileId(fileId: string): { jobId: string; versionTag: string } | null {
+/** Extract job_id and version_tag from a Labex `file_id` (shared with scan pipeline). */
+export function parseFileId(fileId: string): { jobId: string; versionTag: string } | null {
     // Skip file_ids without "labex" (case insensitive)
     if (!fileId.toLowerCase().includes('labex')) {
         return null;
@@ -113,6 +117,28 @@ export interface ScannedCode {
     metadata: Record<string, any> | null;
 }
 
+/**
+ * Resolve `scheduler.Machine.id` for planner operation ids (e.g. op003 → slitter press).
+ * Uses highest `sortOrder` when multiple operations match.
+ */
+export async function getMachineIdForPlannerOperations(
+    plannerOperationIds: string[]
+): Promise<string | null> {
+    const ids = plannerOperationIds.map((s) => s.trim().toLowerCase()).filter(Boolean);
+    if (ids.length === 0) return null;
+    const ops = await prisma.operation.findMany({
+        where: {
+            OR: [
+                { id: { in: ids } },
+                { plannerOperationId: { in: ids, mode: 'insensitive' } },
+            ],
+        },
+        select: { machineId: true, sortOrder: true },
+        orderBy: [{ sortOrder: 'desc' }],
+    });
+    return ops[0]?.machineId ?? null;
+}
+
 /** Presses from `scheduler.Machine` on the app DB (`DATABASE_URL`) — single catalog (no `public.machines`). */
 export async function getMachines(): Promise<Machine[]> {
     const rows = await prisma.machine.findMany({
@@ -132,12 +158,17 @@ export async function getMachines(): Promise<Machine[]> {
     }));
 }
 
-export interface Operation {
-    operation_id: string;
+/** Enabled operations for a machine (Ticket scan picker). */
+export interface ScanCatalogOperation {
+    scheduler_operation_id: string;
+    planner_operation_id: string | null;
     operation_name: string;
     description?: string;
     created_at?: string;
 }
+
+/** @deprecated Use ScanCatalogOperation */
+export type Operation = ScanCatalogOperation;
 
 /** Preset bundles from `machine_modes` (optional). */
 export interface MachineMode {
@@ -183,8 +214,10 @@ export async function getMachineModes(
     }
 }
 
-/** Operations for a press from `scheduler.Operation` (scan codes = `id`, e.g. op001). */
-export async function getAvailableOperations(machineId?: string | null): Promise<Operation[]> {
+/** Operations for a press from `scheduler.Operation` (scan payload uses planner id when set). */
+export async function getAvailableOperations(
+    machineId?: string | null
+): Promise<ScanCatalogOperation[]> {
     const mid = machineId?.trim() || null;
     if (!mid) {
         return [];
@@ -194,11 +227,23 @@ export async function getAvailableOperations(machineId?: string | null): Promise
         orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
     });
     return rows.map((o) => ({
-        operation_id: o.id,
+        scheduler_operation_id: o.id,
+        planner_operation_id: o.plannerOperationId ?? null,
         operation_name: o.name,
         description: o.notes ?? undefined,
         created_at: undefined,
     }));
+}
+
+/** Modes from `Machine.constants.schedulerModes` (config UI), not legacy `machine_modes`. */
+export async function getSchedulerModesForMachine(
+    machineId: string | null | undefined
+): Promise<SchedulerMode[]> {
+    const mid = machineId?.trim();
+    if (!mid) return [];
+    const m = await prisma.machine.findUnique({ where: { id: mid } });
+    if (!m) return [];
+    return parseSchedulerModes(m.constants);
 }
 
 // Legacy function for backward compatibility - maps operation_name to operation code
@@ -216,17 +261,20 @@ export function getOperationCode(operationName: string): string {
     return normalized.replace(/\s+/g, '_');
 }
 
-// Record a scanned code (primary app DB)
+// Record a scanned code (logs DB). Optional imposition id is embedded in code_text (see scan-code-text.ts).
 export async function recordScannedCode(
     codeText: string,
     machineId: string | null,
     userId: string | null,
     operations: Record<string, any> | null = null,
-    metadata: Record<string, any> | null = null
+    metadata: Record<string, any> | null = null,
+    impositionId: string | null = null
 ): Promise<ScannedCode> {
     const client = await logsPool.connect();
     try {
-        const result = await client.query(`
+        const storedCodeText = encodeScanCodeTextWithImposition(impositionId, codeText);
+        const result = await client.query(
+            `
             INSERT INTO scanned_codes (
                 code_text,
                 scanned_at,
@@ -237,13 +285,15 @@ export async function recordScannedCode(
             )
             VALUES ($1, NOW(), $2, $3, $4, $5)
             RETURNING *
-        `, [
-            codeText,
-            machineId,
-            userId,
-            operations ? JSON.stringify(normalizeOperationsPayloadForStorage(operations)) : null,
-            metadata ? JSON.stringify(metadata) : null,
-        ]);
+        `,
+            [
+                storedCodeText,
+                machineId,
+                userId,
+                operations ? JSON.stringify(normalizeOperationsPayloadForStorage(operations)) : null,
+                metadata ? JSON.stringify(metadata) : null,
+            ]
+        );
 
         return result.rows[0];
     } finally {
@@ -261,22 +311,23 @@ export async function recordRunlistScans(
     operations: Record<string, any> | null = null,
     additionalMetadata: Record<string, any> | null = null
 ): Promise<ScannedCode[]> {
-    const appClient = await appPool.connect();
     const logsClient = await logsPool.connect();
     try {
-        // Get all file_ids in this runlist
-        const fileIdsResult = await appClient.query(`
-            SELECT DISTINCT ifm.file_id
+        const fileRowsResult = await logsClient.query(
+            `
+            SELECT DISTINCT ON (ifm.file_id) ifm.file_id, ifm.imposition_id
             FROM imposition_file_mapping ifm
             INNER JOIN production_planner_paths ppp ON ifm.imposition_id = ppp.imposition_id
             WHERE ppp.runlist_id = $1
-            ORDER BY ifm.file_id
-        `, [runlistId]);
-        
-        const fileIds = fileIdsResult.rows.map(row => row.file_id);
-        console.log(`[recordRunlistScans] Found ${fileIds.length} file_ids in runlist ${runlistId}`);
-        
-        if (fileIds.length === 0) {
+            ORDER BY ifm.file_id, ifm.imposition_id
+        `,
+            [runlistId]
+        );
+
+        const fileRows = fileRowsResult.rows as { file_id: string; imposition_id: string }[];
+        console.log(`[recordRunlistScans] Found ${fileRows.length} file_ids in runlist ${runlistId}`);
+
+        if (fileRows.length === 0) {
             console.warn(`[recordRunlistScans] No file_ids found for runlist ${runlistId}`);
             return [];
         }
@@ -294,7 +345,9 @@ export async function recordRunlistScans(
         // Allow duplicate file_id scans - they're valid (same file can be scanned multiple times)
         // Handle scan_id conflicts gracefully by catching errors and continuing
         const recordedScans: ScannedCode[] = [];
-        for (const fileId of fileIds) {
+        for (const row of fileRows) {
+            const fileId = row.file_id;
+            const impositionId = row.imposition_id;
             // Parse file_id to extract job_id and version_tag (do this outside try block for error handling)
             const parsed = parseFileId(fileId);
             if (!parsed) {
@@ -302,11 +355,13 @@ export async function recordRunlistScans(
                 continue;
             }
             
-            // Format as job_id_version_tag (e.g., "4677_5995_1")
-            const codeText = `${parsed.jobId}_${parsed.versionTag}`;
-            
+            // Format as job_id_version_tag (e.g., "4677_5995_1"); imposition id in code_text prefix
+            const baseCodeText = `${parsed.jobId}_${parsed.versionTag}`;
+            const codeText = encodeScanCodeTextWithImposition(impositionId, baseCodeText);
+
             try {
-                const result = await logsClient.query(`
+                const result = await logsClient.query(
+                    `
                     INSERT INTO scanned_codes (
                         code_text,
                         scanned_at,
@@ -317,13 +372,15 @@ export async function recordRunlistScans(
                     )
                     VALUES ($1, NOW(), $2, $3, $4, $5)
                     RETURNING *
-                `, [
-                    codeText, // Use job_id_version_tag format (e.g., "4677_5995_1")
-                    machineId,
-                    userId,
-                    operations ? JSON.stringify(normalizeOperationsPayloadForStorage(operations)) : null,
-                    JSON.stringify(metadata)
-                ]);
+                `,
+                    [
+                        codeText,
+                        machineId,
+                        userId,
+                        operations ? JSON.stringify(normalizeOperationsPayloadForStorage(operations)) : null,
+                        JSON.stringify(metadata),
+                    ]
+                );
                 
                 recordedScans.push(result.rows[0]);
                 console.log(`[recordRunlistScans] Successfully inserted scan for file_id ${fileId} -> code_text: ${codeText} (scan_id: ${result.rows[0].scan_id})`);
@@ -343,7 +400,8 @@ export async function recordRunlistScans(
                         console.log(`[recordRunlistScans] Fixed sequence to ${nextId} for file_id ${fileId}`);
                         
                         // Retry insert with the same codeText
-                        const retryResult = await logsClient.query(`
+                        const retryResult = await logsClient.query(
+                            `
                             INSERT INTO scanned_codes (
                                 code_text,
                                 scanned_at,
@@ -354,13 +412,15 @@ export async function recordRunlistScans(
                             )
                             VALUES ($1, NOW(), $2, $3, $4, $5)
                             RETURNING *
-                        `, [
-                            codeText, // Use job_id_version_tag format
-                            machineId,
-                            userId,
-                            operations ? JSON.stringify(normalizeOperationsPayloadForStorage(operations)) : null,
-                            JSON.stringify(metadata)
-                        ]);
+                        `,
+                            [
+                                codeText,
+                                machineId,
+                                userId,
+                                operations ? JSON.stringify(normalizeOperationsPayloadForStorage(operations)) : null,
+                                JSON.stringify(metadata),
+                            ]
+                        );
                         
                         recordedScans.push(retryResult.rows[0]);
                         console.log(`[recordRunlistScans] Successfully inserted scan after retry for file_id ${fileId} -> code_text: ${codeText} (scan_id: ${retryResult.rows[0].scan_id})`);
@@ -379,7 +439,6 @@ export async function recordRunlistScans(
         console.log(`[recordRunlistScans] Recorded ${recordedScans.length} scans for runlist ${runlistId}`);
         return recordedScans;
     } finally {
-        appClient.release();
         logsClient.release();
     }
 }
@@ -422,6 +481,14 @@ export interface JobFilterOptions {
     /** ISO — filters by latest_completed_at (last scan time) */
     dateTo?: string;
     limit?: number;
+    offset?: number;
+    /** Cursor marker for keyset-style paging on latest_completed_at. */
+    markerLatestCompletedAt?: string;
+    markerJobId?: string;
+    /** Optional faster mode to avoid expensive latest_completed_at sorting. */
+    sort?: 'latest' | 'none';
+    /** Skip runlist resolution/join when consumer does not need runlist_id. */
+    includeRunlist?: boolean;
 }
 
 // Removed getScannedOperationsFromScannedCodes() - no longer needed
@@ -459,6 +526,19 @@ function buildJobStatusViewWhere(
         fragment += ` AND latest_completed_at <= $${i++}`;
         params.push(filters.dateTo);
     }
+    if (filters?.markerLatestCompletedAt) {
+        if (filters?.markerJobId) {
+            fragment += ` AND (
+                latest_completed_at < $${i}
+                OR (latest_completed_at = $${i} AND job_id < $${i + 1})
+            )`;
+            params.push(filters.markerLatestCompletedAt, filters.markerJobId);
+            i += 2;
+        } else {
+            fragment += ` AND latest_completed_at < $${i++}`;
+            params.push(filters.markerLatestCompletedAt);
+        }
+    }
     return { fragment, params };
 }
 
@@ -469,7 +549,7 @@ const RUNLIST_BATCH_SIZE = 80;
 async function batchResolveRunlistIds(
     client: import('pg').PoolClient,
     rows: { job_id: string; version_tags?: string[] }[],
-    /** imposition_file_mapping + production_planner_paths (app DB when dual-DB). */
+    /** imposition_file_mapping + production_planner_paths (logs DB only). */
     plannerClient?: import('pg').PoolClient
 ): Promise<Map<string, string[]>> {
     const planner = plannerClient ?? client;
@@ -534,30 +614,85 @@ function mapJobStatusRow(row: any): any {
     };
 }
 
+function mapJobStatusRowWithoutRunlist(row: any): any {
+    return {
+        job_id: row.job_id,
+        total_versions: parseInt(row.total_versions, 10) || 0,
+        completed_versions: parseInt(row.completed_versions, 10) || 0,
+        version_tags: row.version_tags || [],
+        status: row.status || 'print_ready',
+        latest_completed_operation_id: row.latest_completed_operation_id || null,
+        created_at: row.earliest_completed_at || null,
+        updated_at: row.latest_completed_at || null,
+        runlist_id: null,
+    };
+}
+
+async function queryJobStatusViewFast(
+    client: import('pg').PoolClient,
+    fragment: string,
+    baseParams: any[],
+    limitValue: number | null,
+    offsetValue: number | null,
+    sortMode: 'latest' | 'none'
+): Promise<any[]> {
+    const params = [...baseParams];
+    const orderBy =
+        sortMode === 'none'
+            ? 'job_id DESC'
+            : 'latest_completed_at DESC NULLS LAST, job_id DESC';
+    let query = `SELECT * FROM job_status_view WHERE 1=1 ${fragment} ORDER BY ${orderBy}`;
+    if (limitValue) {
+        query += ` LIMIT $${params.length + 1}`;
+        params.push(limitValue);
+        if (offsetValue != null) {
+            query += ` OFFSET $${params.length + 1}`;
+            params.push(offsetValue);
+        }
+    }
+    const result = await client.query(query, params);
+    return result.rows.map(mapJobStatusRowWithoutRunlist);
+}
+
 /** Primary path: read job_status_runlist_view (runlist resolved in Postgres). LIMIT applies to distinct jobs via CTE. */
 async function queryJobStatusRunlistView(
     client: import('pg').PoolClient,
     fragment: string,
     baseParams: any[],
-    limitValue: number | null
+    limitValue: number | null,
+    offsetValue: number | null,
+    sortMode: 'latest' | 'none'
 ): Promise<any[]> {
     const params = [...baseParams];
     let primaryQuery: string;
+    const orderBy =
+        sortMode === 'none'
+            ? 'v.job_id DESC, v.runlist_id NULLS LAST'
+            : 'v.latest_completed_at DESC NULLS LAST, v.job_id DESC, v.runlist_id NULLS LAST';
     if (limitValue) {
         const limIdx = baseParams.length + 1;
+        const offIdx = offsetValue != null ? limIdx + 1 : null;
+        const limitedOrderBy =
+            sortMode === 'none'
+                ? 'job_id DESC'
+                : 'latest_completed_at DESC NULLS LAST, job_id DESC';
         primaryQuery = `
       WITH limited_jobs AS (
         SELECT job_id FROM job_status_view WHERE 1=1 ${fragment}
-        ORDER BY latest_completed_at DESC NULLS LAST, job_id DESC
+        ORDER BY ${limitedOrderBy}
         LIMIT $${limIdx}
+        ${offIdx != null ? `OFFSET $${offIdx}` : ''}
       )
       SELECT v.* FROM job_status_runlist_view v
       INNER JOIN limited_jobs lj ON v.job_id = lj.job_id
-      ORDER BY v.latest_completed_at DESC NULLS LAST, v.job_id DESC, v.runlist_id NULLS LAST`;
+      ORDER BY ${orderBy}`;
         params.push(limitValue);
+        if (offIdx != null) {
+            params.push(offsetValue);
+        }
     } else {
         primaryQuery = `SELECT * FROM job_status_runlist_view WHERE 1=1 ${fragment}
-      ORDER BY latest_completed_at DESC NULLS LAST, job_id DESC, runlist_id NULLS LAST`;
+      ORDER BY ${orderBy}`;
     }
 
     try {
@@ -597,17 +732,27 @@ async function getJobsUsingStatusViewAndBatch(
     filters: JobFilterOptions | undefined,
     excludeFinished: boolean,
     onlyFinished: boolean,
-    limitValue: number | null
+    limitValue: number | null,
+    offsetValue: number | null,
+    sortMode: 'latest' | 'none'
 ): Promise<any[]> {
     const { fragment, params: whereParams } = buildJobStatusViewWhere(filters, excludeFinished, onlyFinished);
     const params = [...whereParams];
     let query = `SELECT * FROM job_status_view WHERE 1=1${fragment}`;
     let result;
     try {
-        query += ` ORDER BY latest_completed_at DESC NULLS LAST, job_id DESC`;
+        if (sortMode === 'none') {
+            query += ` ORDER BY job_id DESC`;
+        } else {
+            query += ` ORDER BY latest_completed_at DESC NULLS LAST, job_id DESC`;
+        }
         if (limitValue) {
             query += ` LIMIT $${params.length + 1}`;
             params.push(limitValue);
+            if (offsetValue != null) {
+                query += ` OFFSET $${params.length + 1}`;
+                params.push(offsetValue);
+            }
         }
         result = await client.query(query, params);
     } catch (error: any) {
@@ -664,14 +809,35 @@ export async function getJobs(filters?: JobFilterOptions): Promise<any[]> {
         : filters?.excludeStatus === 'production_finished';
     const onlyFinished = filters?.status === 'production_finished';
     const limitValue = filters?.limit && filters.limit > 0 ? filters.limit : null;
+    const offsetValue = filters?.offset && filters.offset > 0 ? filters.offset : null;
+    const sortMode: 'latest' | 'none' = filters?.sort === 'none' ? 'none' : 'latest';
+    const includeRunlist = filters?.includeRunlist !== false;
     const { fragment, params: whereParams } = buildJobStatusViewWhere(filters, excludeFinished, onlyFinished);
 
     const viewPool = poolForJobPipelineViews();
     const client = await viewPool.connect();
-    const plannerClient = isDedicatedLogsDatabase() ? await appPool.connect() : client;
+    /** Runlist resolution reads `imposition_file_mapping` on logs only — same pool as pipeline views when dual-DB. */
+    const plannerClient = client;
     try {
+        if (!includeRunlist) {
+            return await queryJobStatusViewFast(
+                client,
+                fragment,
+                whereParams,
+                limitValue,
+                offsetValue,
+                sortMode
+            );
+        }
         try {
-            return await queryJobStatusRunlistView(client, fragment, whereParams, limitValue);
+            return await queryJobStatusRunlistView(
+                client,
+                fragment,
+                whereParams,
+                limitValue,
+                offsetValue,
+                sortMode
+            );
         } catch (error: any) {
             const msg = String(error?.message || '');
             const missingRunlistView =
@@ -687,7 +853,9 @@ export async function getJobs(filters?: JobFilterOptions): Promise<any[]> {
                     filters,
                     excludeFinished,
                     onlyFinished,
-                    limitValue
+                    limitValue,
+                    offsetValue,
+                    sortMode
                 );
             }
             throw error;
@@ -700,16 +868,13 @@ export async function getJobs(filters?: JobFilterOptions): Promise<any[]> {
         throw error;
     } finally {
         client.release();
-        if (plannerClient !== client) {
-            plannerClient.release();
-        }
     }
 }
 
 // Fallback function if view doesn't exist (original implementation)
 async function getJobsFallback(filters?: JobFilterOptions): Promise<any[]> {
     const client = await poolForJobPipelineViews().connect();
-    const plannerClient = isDedicatedLogsDatabase() ? await appPool.connect() : client;
+    const plannerClient = client;
     try {
         let query = `
             SELECT 
@@ -805,7 +970,9 @@ async function getJobsFallback(filters?: JobFilterOptions): Promise<any[]> {
                         BOOL_OR(LOWER(operation_id) = 'op001' AND completed_at IS NOT NULL) as has_op001,
                         BOOL_OR(LOWER(operation_id) = 'op002' AND completed_at IS NOT NULL) as has_op002,
                         BOOL_OR(LOWER(operation_id) = 'op003' AND completed_at IS NOT NULL) as has_op003,
-                        BOOL_OR(LOWER(operation_id) = 'op004' AND completed_at IS NOT NULL) as has_op004
+                        BOOL_OR(LOWER(operation_id) = 'op004' AND completed_at IS NOT NULL) as has_op004,
+                        BOOL_OR(LOWER(operation_id) = 'op005' AND completed_at IS NOT NULL) as has_op005,
+                        BOOL_OR(LOWER(operation_id) = 'op006' AND completed_at IS NOT NULL) as has_op006
                      FROM job_operations
                      WHERE job_id = $1`,
                     [row.job_id]
@@ -818,19 +985,27 @@ async function getJobsFallback(filters?: JobFilterOptions): Promise<any[]> {
                     if (ops.has_op004) {
                         status = 'production_finished';
                     }
-                    // 2. If both op002 and op003 are scanned, it's slitter
+                    // 2. If op006 is scanned, it's slitter
+                    else if (ops.has_op006) {
+                        status = 'slitter';
+                    }
+                    // 3. If both op002 and op003 are scanned, it's slitter
                     else if (ops.has_op002 && ops.has_op003) {
                         status = 'slitter';
                     }
-                    // 3. If op003 is scanned alone, it's slitter
+                    // 4. If op003 is scanned alone, it's slitter
                     else if (ops.has_op003) {
                         status = 'slitter';
                     }
-                    // 4. If only op002 is scanned (without op003), it's digital_cut
+                    // 5. If op005 is scanned, it's digital_cut
+                    else if (ops.has_op005) {
+                        status = 'digital_cut';
+                    }
+                    // 6. If only op002 is scanned (without op003), it's digital_cut
                     else if (ops.has_op002) {
                         status = 'digital_cut';
                     }
-                    // 5. If op001 is scanned, it's printed
+                    // 7. If op001 is scanned, it's printed
                     else if (ops.has_op001) {
                         status = 'printed';
                     }
@@ -891,9 +1066,6 @@ async function getJobsFallback(filters?: JobFilterOptions): Promise<any[]> {
         return jobsWithRunlist;
     } finally {
         client.release();
-        if (plannerClient !== client) {
-            plannerClient.release();
-        }
     }
 }
 

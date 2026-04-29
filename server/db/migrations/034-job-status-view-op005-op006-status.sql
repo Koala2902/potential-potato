@@ -1,61 +1,14 @@
--- Migration: job_status_view performance (indexes, code_type, inline status)
--- Date: 2026-03-25
--- LOGS DATABASE
--- Fixes: index-backed ORDER BY in latest_operations, filtered scanned_codes CTE,
---        replace get_status_from_operations() per-row calls with set-based flags + CASE.
+-- Migration: extend job_status_view status mapping for op005/op006
+-- Date: 2026-04-29
+-- LOGS DATABASE (or app DB in single-DB mode via run-migrations pipe target)
+-- Changes:
+--   - op005 contributes to digital_cut
+--   - op006 contributes to slitter
+--   - scanned operation flags include op005/op006
 
--- ============================================================================
--- 1) Views that depend on job_status_view must be dropped first
--- ============================================================================
 DROP VIEW IF EXISTS job_status_runlist_view CASCADE;
-
 DROP VIEW IF EXISTS job_status_view CASCADE;
 
--- ============================================================================
--- 2) scanned_codes: generated code_type + indexes (no regex in hot path for job_op)
--- ============================================================================
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM information_schema.columns
-    WHERE table_schema = 'public'
-      AND table_name = 'scanned_codes'
-      AND column_name = 'code_type'
-  ) THEN
-    ALTER TABLE scanned_codes
-      ADD COLUMN code_type text GENERATED ALWAYS AS (
-        CASE
-          WHEN code_text ~ '^\d+_\d+_\d+$' THEN 'job_op'
-          ELSE 'other'
-        END
-      ) STORED;
-  END IF;
-END $$;
-
-CREATE INDEX IF NOT EXISTS idx_sc_code_type
-  ON scanned_codes (code_type)
-  WHERE code_type = 'job_op';
-
-CREATE INDEX IF NOT EXISTS idx_sc_scanned_sydney
-  ON scanned_codes ((scanned_at AT TIME ZONE 'Australia/Sydney') DESC)
-  WHERE code_type = 'job_op';
-
-COMMENT ON COLUMN scanned_codes.code_type IS
-  'job_op = job_id_version_tag (regex ^\\d+_\\d+_\\d+$); other = FILE/runlist/etc.';
-
--- ============================================================================
--- 3) job_operations: functional indexes matching DISTINCT ON sort key
--- ============================================================================
-CREATE INDEX IF NOT EXISTS idx_job_ops_completed_sydney
-  ON job_operations (job_id, (completed_at AT TIME ZONE 'Australia/Sydney'));
-
-CREATE INDEX IF NOT EXISTS idx_job_ops_completed_sydney_notnull
-  ON job_operations (job_id, (completed_at AT TIME ZONE 'Australia/Sydney') DESC)
-  WHERE completed_at IS NOT NULL;
-
--- ============================================================================
--- 4) job_status_view — inlined status (same rules as get_status_from_operations + OR scanned)
--- ============================================================================
 CREATE VIEW job_status_view AS
 WITH job_ops_flags AS (
   SELECT
@@ -70,7 +23,6 @@ WITH job_ops_flags AS (
   GROUP BY job_id
 ),
 scanned_hits AS (
-  -- job_id_version_tag rows (matches former regex filter; uses code_type = job_op)
   SELECT DISTINCT
     SPLIT_PART(sc.code_text, '_', 1) || '_' || SPLIT_PART(sc.code_text, '_', 2) AS job_id,
     lower(trim(op_elem::text)) AS op_id
@@ -84,7 +36,6 @@ scanned_hits AS (
 
   UNION ALL
 
-  -- FILE_*_Labex_* (same job resolution as has_scanned_operation FILE branch)
   SELECT DISTINCT
     extract_job_id_from_labex_file(sc.code_text) AS job_id,
     lower(trim(op_elem::text)) AS op_id
@@ -100,7 +51,6 @@ scanned_hits AS (
 
   UNION ALL
 
-  -- Runlist barcode: code_text = runlist_id (has_scanned_operation legacy branch)
   SELECT DISTINCT
     extract_job_id_from_labex_file(ifm.file_id) AS job_id,
     lower(trim(op_elem::text)) AS op_id
@@ -209,11 +159,8 @@ GROUP BY
   sf.sc_op006;
 
 COMMENT ON VIEW job_status_view IS
-  'Job status: latest op by Sydney-local time; status from inlined op001-op006 flags (job_operations OR scanned_codes). op005 maps to digital_cut and op006 maps to slitter. Uses code_type on scanned_codes and functional indexes on job_operations.';
+  'Job status: latest op by Sydney-local time; status from inlined op001-op006 flags (job_operations OR scanned_codes). op005 maps to digital_cut and op006 maps to slitter.';
 
--- ============================================================================
--- 5) Restore runlist expansion view (same definition as migration 016)
--- ============================================================================
 CREATE OR REPLACE VIEW job_status_runlist_view AS
 SELECT
   jsv.job_id,
@@ -237,6 +184,3 @@ LEFT JOIN LATERAL (
 
 COMMENT ON VIEW job_status_runlist_view IS
   'job_status_view expanded with runlist_id; primary data source for GET /api/jobs.';
-
-ANALYZE scanned_codes;
-ANALYZE job_operations;

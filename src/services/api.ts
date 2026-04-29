@@ -6,7 +6,13 @@ import type {
     UpdateOperationBodyInput,
 } from '../lib/scheduler/validations/config';
 import type { SchedulerMode, SchedulerRoutingFlow } from '../lib/scheduler/machine-routing';
-import { ProductionQueueItem, ImpositionDetails, ImpositionFileItem } from '../types';
+import {
+    ProductionQueueItem,
+    ImpositionDetails,
+    ImpositionFileItem,
+    JobOperationLane,
+    JobStatusRow,
+} from '../types';
 
 const API_BASE_URL = '/api';
 
@@ -189,9 +195,14 @@ export interface JobFilterOptions {
     /** ISO timestamp — filters jobs whose latest scan (`latest_completed_at`) is on or before this */
     dateTo?: string;
     limit?: number;
+    offset?: number;
+    markerLatestCompletedAt?: string;
+    markerJobId?: string;
+    sort?: 'latest' | 'none';
+    includeRunlist?: boolean;
 }
 
-export async function fetchJobs(filters?: JobFilterOptions): Promise<any[]> {
+export async function fetchJobs(filters?: JobFilterOptions): Promise<JobStatusRow[]> {
     const params = new URLSearchParams();
     
     if (filters?.status) params.append('status', filters.status);
@@ -206,11 +217,45 @@ export async function fetchJobs(filters?: JobFilterOptions): Promise<any[]> {
     if (filters?.dateFrom) params.append('dateFrom', filters.dateFrom);
     if (filters?.dateTo) params.append('dateTo', filters.dateTo);
     if (filters?.limit) params.append('limit', filters.limit.toString());
+    if (typeof filters?.offset === 'number') params.append('offset', filters.offset.toString());
+    if (filters?.markerLatestCompletedAt) {
+        params.append('markerLatestCompletedAt', filters.markerLatestCompletedAt);
+    }
+    if (filters?.markerJobId) params.append('markerJobId', filters.markerJobId);
+    if (filters?.sort) params.append('sort', filters.sort);
+    if (typeof filters?.includeRunlist === 'boolean') {
+        params.append('includeRunlist', filters.includeRunlist ? 'true' : 'false');
+    }
 
     const url = `${API_BASE_URL}/jobs${params.toString() ? `?${params.toString()}` : ''}`;
     const response = await fetch(url);
     if (!response.ok) {
         throw new Error('Failed to fetch jobs');
+    }
+    return response.json();
+}
+
+export async function moveJobToOperationLane(
+    jobId: string,
+    operationId: JobOperationLane
+): Promise<{
+    success: boolean;
+    jobId: string;
+    operationId: JobOperationLane;
+    scannedCodesCreated: number;
+}> {
+    const response = await fetch(`${API_BASE_URL}/jobs/${encodeURIComponent(jobId)}/move-operation`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ operationId }),
+    });
+    if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        const msg =
+            (typeof payload?.error === 'string' && payload.error) ||
+            (typeof payload?.message === 'string' && payload.message) ||
+            'Failed to move job operation';
+        throw new Error(msg);
     }
     return response.json();
 }

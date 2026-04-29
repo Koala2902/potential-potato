@@ -114,6 +114,11 @@ async function main() {
         await runMigration(path.join(migrationsDir, '024-machine-modes.sql'), 'app');
         await runMigration(path.join(migrationsDir, '026-scheduler-job-file-name.sql'), 'app');
         await runMigration(path.join(migrationsDir, '027-scheduler-job-machine-schedule.sql'), 'app');
+        await runMigration(path.join(migrationsDir, '029-drop-scanned-codes-imposition-id.sql'), 'logs');
+        await runMigration(path.join(migrationsDir, '030-labex-barcode-pattern-operation-duration.sql'), 'logs');
+        await runMigration(path.join(migrationsDir, '031-operation-duration-first-last-30h-window.sql'), 'logs');
+        await runMigration(path.join(migrationsDir, '033-operation-duration-end-mirrors-start.sql'), 'logs');
+        await runMigration(path.join(migrationsDir, '034-job-status-view-op005-op006-status.sql'), pipe);
 
         console.log('\n=== Migration Summary ===');
         console.log('✓ All migrations completed successfully!');
