@@ -38,48 +38,14 @@ import { PRODUCTION_COMPLETED_JOBS_PER_MACHINE } from './db/production-status-li
 import { canonicalCompositeJobIdForDisplay } from './db/scan-job-version.js';
 import { isUndefinedTableError } from './db/pg-errors.js';
 import { schedulerRouter } from './scheduler-api.js';
+import { warnIfPdfMissing } from './pdf-archive.js';
+import { warmPdfThumbnail } from './services/pdfThumbnailService.js';
+import { initPdfServices, pdfApiRouter } from './pdf-api.js';
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
-
-/**
- * Mounted folder for imposition PDFs (cannot use smb:// — mount the share in Finder, then use the /Volumes/... path).
- * Example Synology layout: .../RDevArchive/2026/<imposition_id>.pdf
- */
-const PDF_ARCHIVE_PATH =
-    process.env.PDF_ARCHIVE_PATH?.trim() ||
-    '/Volumes/Daily Print Jobs/_NEXT HotFolder/RDevArchive';
-
-/** Comma-separated year folder names to try under PDF_ARCHIVE_PATH (default: current year and two prior). */
-function pdfYearSubfoldersToTry(): string[] {
-    if (process.env.PDF_ARCHIVE_TRY_YEAR_SUBFOLDERS === 'false') {
-        return [];
-    }
-    const custom = process.env.PDF_ARCHIVE_YEAR_FOLDERS?.trim();
-    if (custom) {
-        return custom.split(',').map((s) => s.trim()).filter(Boolean);
-    }
-    const y = new Date().getFullYear();
-    return [String(y), String(y - 1), String(y - 2)];
-}
-
-/** First path that exists: flat `<archive>/<id>.pdf`, then `<archive>/<year>/<id>.pdf`. */
-function resolvePdfPathForImposition(impositionId: string): string | null {
-    const name = `${impositionId}.pdf`;
-    const direct = path.join(PDF_ARCHIVE_PATH, name);
-    if (fs.existsSync(direct)) {
-        return direct;
-    }
-    for (const y of pdfYearSubfoldersToTry()) {
-        const nested = path.join(PDF_ARCHIVE_PATH, y, name);
-        if (fs.existsSync(nested)) {
-            return nested;
-        }
-    }
-    return null;
-}
 
 console.log('Starting server...');
 console.log(`Port: ${PORT}`);
@@ -90,23 +56,12 @@ console.log(
         ? `Print OS ("print OS" table): JOBMANAGER_DATABASE_URL → jobmanager (or dedicated URL)`
         : `Print OS: same as App DB (set JOBMANAGER_DATABASE_URL if "print OS" is on database jobmanager)`
 );
-console.log(`PDF archive: ${PDF_ARCHIVE_PATH} (flat + year subfolders: ${pdfYearSubfoldersToTry().join(', ') || 'off'})`);
-if (!fs.existsSync(PDF_ARCHIVE_PATH)) {
-    console.warn(
-        `[pdf] Path does not exist or is not mounted. Mount the SMB share in Finder, set PDF_ARCHIVE_PATH to the RDevArchive folder (not smb://).`
-    );
-}
-
-/** Logs a warning when no PDF exists under the archive (flat or year subfolder). */
-function warnIfPdfMissing(impositionId: string): void {
-    if (!resolvePdfPathForImposition(impositionId)) {
-        console.warn(`[pdf] Not found under ${PDF_ARCHIVE_PATH}: ${impositionId}.pdf`);
-    }
-}
+initPdfServices();
 
 app.use(cors());
 app.use(express.json());
 app.use('/api/scheduler', schedulerRouter);
+app.use('/api/pdf', pdfApiRouter);
 
 // Root route - server status
 app.get('/', (req, res) => {
@@ -173,54 +128,6 @@ app.get('/api/imposition/:impositionId/file-ids', async (req, res) => {
     }
 });
 
-// Check if PDF exists (HEAD request)
-app.head('/api/pdf/:impositionId', async (req, res) => {
-    try {
-        const { impositionId } = req.params;
-        const pdfPath = resolvePdfPathForImposition(impositionId);
-
-        if (pdfPath && fs.existsSync(pdfPath)) {
-            const stats = fs.statSync(pdfPath);
-            res.setHeader('Content-Type', 'application/pdf');
-            res.setHeader('Content-Length', stats.size.toString());
-            res.status(200).end();
-        } else {
-            res.status(404).end();
-        }
-    } catch (error) {
-        console.error('Error checking PDF:', error);
-        res.status(500).end();
-    }
-});
-
-// Serve PDF from archive folder
-app.get('/api/pdf/:impositionId', async (req, res) => {
-    try {
-        const { impositionId } = req.params;
-        const pdfPath = resolvePdfPathForImposition(impositionId);
-
-        if (!pdfPath) {
-            console.warn('[pdf] Not found:', path.join(PDF_ARCHIVE_PATH, `${impositionId}.pdf`), '(and year subfolders)');
-            return res.status(404).json({ error: 'PDF not found' });
-        }
-        
-        // Set headers for PDF
-        res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader('Content-Disposition', `inline; filename="${impositionId}.pdf"`);
-        
-        // Stream the PDF file
-        const fileStream = fs.createReadStream(pdfPath);
-        fileStream.pipe(res);
-        
-        fileStream.on('error', (error) => {
-            console.error('Error streaming PDF:', error);
-            res.status(500).json({ error: 'Failed to stream PDF' });
-        });
-    } catch (error) {
-        console.error('Error serving PDF:', error);
-        res.status(500).json({ error: 'Failed to serve PDF' });
-    }
-});
 
 // Get machines from app database
 app.get('/api/machines', async (req, res) => {
@@ -1041,6 +948,7 @@ app.post('/api/scan', async (req, res) => {
                 scannedImpositionId = await findImpositionIdForScanInRunlist(scan, runlistId);
                 if (scannedImpositionId) {
                     warnIfPdfMissing(scannedImpositionId);
+                    warmPdfThumbnail(scannedImpositionId);
                 }
             } catch (err) {
                 console.error(`[POST /api/scan] Error finding imposition_id:`, err);

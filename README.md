@@ -25,13 +25,14 @@ A sophisticated job tracking system for print production workflows with USB scan
 - **Frontend**: React 18 + TypeScript + Vite
 - **Styling**: Vanilla CSS with custom design system
 - **Icons**: Lucide React
-- **PDF Handling**: React-PDF (ready for integration)
+- **PDF Handling**: Server-generated WebP thumbnails (Poppler + Sharp) — see [docs/pdf-preview.md](docs/pdf-preview.md)
 
 ## Getting Started
 
 ### Prerequisites
 - Node.js 20.19+ or 22.12+ (currently working with 20.12.2)
 - npm or yarn
+- **poppler-utils** (`pdftoppm`) for Ticket PDF thumbnails — macOS: `brew install poppler`, Debian/Ubuntu: `apt install poppler-utils`
 
 ### Installation
 

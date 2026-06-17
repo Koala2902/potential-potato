@@ -340,6 +340,19 @@ export default function TicketPage() {
         }
     };
 
+
+    const nextImpositionId = useMemo(() => {
+        if (!selectedImposition) return null;
+        const flat = queue.flatMap((item) =>
+            item.impositions.map((imp) => imp.imposition_id)
+        );
+        const idx = flat.indexOf(selectedImposition.imposition_id);
+        if (idx >= 0 && idx < flat.length - 1) {
+            return flat[idx + 1];
+        }
+        return null;
+    }, [queue, selectedImposition]);
+
     const handleSelectImposition = (imposition: ImpositionItem, _runlistId: string) => {
         setSelectedImposition(imposition);
     };
@@ -613,6 +626,7 @@ export default function TicketPage() {
                     imposition={selectedImposition}
                     details={impositionDetails}
                     fileIds={fileIds}
+                    prefetchImpositionId={nextImpositionId}
                 />
             </div>
 

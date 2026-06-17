@@ -1,23 +1,24 @@
 import { ImpositionItem, ImpositionDetails } from '../../types';
 import { FileText } from 'lucide-react';
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { Document, Page } from 'react-pdf';
-import 'react-pdf/dist/Page/AnnotationLayer.css';
-import 'react-pdf/dist/Page/TextLayer.css';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import './ImpositionViewer.css';
 
 interface ImpositionViewerProps {
     imposition: ImpositionItem | null;
     details: ImpositionDetails | null;
     fileIds: string[];
+    /** Next imposition in queue — thumbnail URL is prefetched when set. */
+    prefetchImpositionId?: string | null;
 }
 
-/** Extra pixels for canvas (render larger than view, then scale down for sharpness). */
-const RESOLUTION_BOOST = 1.85;
+/** Stable request width — CSS fitScale handles panel sizing; avoids refetch on resize. */
+const THUMB_REQUEST_WIDTH = 1200;
 
-export default function ImpositionViewer({ imposition }: ImpositionViewerProps) {
+export default function ImpositionViewer({
+    imposition,
+    prefetchImpositionId,
+}: ImpositionViewerProps) {
     const [pdfError, setPdfError] = useState<string | null>(null);
-    const [archiveOk, setArchiveOk] = useState<boolean | null>(null);
     const [pdfLoading, setPdfLoading] = useState(true);
     const [fitScale, setFitScale] = useState(1);
 
@@ -26,34 +27,14 @@ export default function ImpositionViewer({ imposition }: ImpositionViewerProps) 
 
     const [shellSize, setShellSize] = useState({ w: 400, h: 500 });
 
+    const thumbUrl = imposition
+        ? `/api/pdf/${imposition.imposition_id}/thumbnail?w=${THUMB_REQUEST_WIDTH}`
+        : null;
+
     useEffect(() => {
         setPdfError(null);
-        setArchiveOk(null);
         setPdfLoading(true);
         setFitScale(1);
-
-        if (!imposition?.imposition_id) {
-            return;
-        }
-
-        fetch(`/api/pdf/${imposition.imposition_id}`, { method: 'HEAD' })
-            .then((response) => {
-                if (!response.ok) {
-                    if (response.status === 404) {
-                        setPdfError('PDF not found in archive');
-                    } else {
-                        setPdfError(`Failed to load PDF (${response.status})`);
-                    }
-                    setPdfLoading(false);
-                    return;
-                }
-                setArchiveOk(true);
-            })
-            .catch((err) => {
-                console.error('Error checking PDF:', err);
-                setPdfError('Could not reach PDF archive');
-                setPdfLoading(false);
-            });
     }, [imposition?.imposition_id]);
 
     useEffect(() => {
@@ -67,16 +48,23 @@ export default function ImpositionViewer({ imposition }: ImpositionViewerProps) 
         ro.observe(el);
         setShellSize({ w: el.clientWidth, h: el.clientHeight });
         return () => ro.disconnect();
-    }, [archiveOk]);
+    }, [imposition?.imposition_id]);
 
-    const pageWidth = useMemo(() => {
-        const pad = 12;
-        const m = Math.max(Math.min(shellSize.w, shellSize.h) - pad * 2, 100);
-        const dpr = typeof window !== 'undefined' ? Math.min(window.devicePixelRatio || 1, 2) : 1.5;
-        return Math.round(m * RESOLUTION_BOOST * dpr);
-    }, [shellSize]);
+    useEffect(() => {
+        if (!prefetchImpositionId) return;
+        const href = `/api/pdf/${prefetchImpositionId}/thumbnail?w=${THUMB_REQUEST_WIDTH}`;
+        const link = document.createElement('link');
+        link.rel = 'prefetch';
+        link.as = 'image';
+        link.href = href;
+        document.head.appendChild(link);
+        return () => {
+            if (link.isConnected) {
+                document.head.removeChild(link);
+            }
+        };
+    }, [prefetchImpositionId]);
 
-    /** r = unscaledRotated * prevScale; target scale = min(shell/r) * prevScale * 0.98 */
     const updateFitScale = useCallback(() => {
         setFitScale((prev) => {
             const shell = shellRef.current;
@@ -93,12 +81,39 @@ export default function ImpositionViewer({ imposition }: ImpositionViewerProps) 
     useEffect(() => {
         const id = requestAnimationFrame(() => updateFitScale());
         return () => cancelAnimationFrame(id);
-    }, [shellSize, pageWidth, updateFitScale]);
+    }, [shellSize, updateFitScale]);
 
     useEffect(() => {
         window.addEventListener('resize', updateFitScale);
         return () => window.removeEventListener('resize', updateFitScale);
     }, [updateFitScale]);
+
+    const onImageLoad = () => {
+        setPdfLoading(false);
+        setPdfError(null);
+        requestAnimationFrame(() => updateFitScale());
+    };
+
+    const onImageError = async () => {
+        if (!thumbUrl) {
+            setPdfError('Failed to load preview');
+            setPdfLoading(false);
+            return;
+        }
+        try {
+            const res = await fetch(thumbUrl);
+            if (res.status === 404) {
+                setPdfError('PDF not found in archive');
+            } else if (res.status === 503) {
+                setPdfError('Preview renderer unavailable (install poppler-utils)');
+            } else {
+                setPdfError(`Failed to load preview (${res.status})`);
+            }
+        } catch {
+            setPdfError('Could not reach preview service');
+        }
+        setPdfLoading(false);
+    };
 
     if (!imposition) {
         return (
@@ -113,22 +128,6 @@ export default function ImpositionViewer({ imposition }: ImpositionViewerProps) 
             </div>
         );
     }
-
-    const pdfUrl = `/api/pdf/${imposition.imposition_id}`;
-
-    const onDocumentLoad = () => {
-        setPdfLoading(false);
-        setPdfError(null);
-    };
-
-    const onDocumentError = () => {
-        setPdfError('Failed to render PDF preview');
-        setPdfLoading(false);
-    };
-
-    const onPageRenderSuccess = () => {
-        requestAnimationFrame(() => updateFitScale());
-    };
 
     return (
         <div className="imposition-viewer">
@@ -148,17 +147,14 @@ export default function ImpositionViewer({ imposition }: ImpositionViewerProps) 
                                 <div className="pdf-note" style={{ color: 'var(--status-error)' }}>
                                     {pdfError}
                                 </div>
-                                <div className="pdf-note-sub">PDF file may not exist in archive</div>
+                                <div className="pdf-note-sub">
+                                    {pdfError === 'PDF not found in archive'
+                                        ? 'PDF file may not exist in archive'
+                                        : 'Check server logs or contact support'}
+                                </div>
                             </div>
                         </div>
-                    ) : archiveOk === null ? (
-                        <div className="pdf-thumbnail-shell">
-                            <div className="pdf-thumbnail-loading" style={{ pointerEvents: 'auto' }}>
-                                <FileText size={48} strokeWidth={1.5} />
-                                <div className="pdf-note">Checking archive…</div>
-                            </div>
-                        </div>
-                    ) : archiveOk === true ? (
+                    ) : (
                         <div ref={shellRef} className="pdf-thumbnail-shell">
                             {pdfLoading && (
                                 <div className="pdf-thumbnail-loading">
@@ -166,39 +162,33 @@ export default function ImpositionViewer({ imposition }: ImpositionViewerProps) 
                                     <div className="pdf-note">Loading preview…</div>
                                 </div>
                             )}
-                            <Document
-                                key={imposition.imposition_id}
-                                file={pdfUrl}
-                                onLoadSuccess={onDocumentLoad}
-                                onLoadError={onDocumentError}
-                                loading={null}
-                                className="pdf-thumbnail-document"
+                            <div
+                                className="pdf-thumbnail-scale-wrap"
+                                style={{
+                                    transform: `scale(${fitScale})`,
+                                    transformOrigin: 'center center',
+                                    visibility: pdfLoading ? 'hidden' : 'visible',
+                                }}
                             >
                                 <div
-                                    className="pdf-thumbnail-scale-wrap"
-                                    style={{
-                                        transform: `scale(${fitScale})`,
-                                        transformOrigin: 'center center',
-                                    }}
+                                    ref={innerRotatedRef}
+                                    className="pdf-thumbnail-rotated"
+                                    style={{ transform: 'rotate(90deg)', transformOrigin: 'center center' }}
                                 >
-                                    <div
-                                        ref={innerRotatedRef}
-                                        className="pdf-thumbnail-rotated"
-                                        style={{ transform: 'rotate(90deg)', transformOrigin: 'center center' }}
-                                    >
-                                        <Page
-                                            pageNumber={1}
-                                            width={pageWidth}
-                                            renderTextLayer={false}
-                                            renderAnnotationLayer={false}
-                                            className="pdf-thumbnail-page"
-                                            onRenderSuccess={onPageRenderSuccess}
+                                    {thumbUrl && (
+                                        <img
+                                            key={thumbUrl}
+                                            src={thumbUrl}
+                                            alt={imposition.simplified_name}
+                                            className="pdf-thumbnail-image"
+                                            onLoad={onImageLoad}
+                                            onError={onImageError}
                                         />
-                                    </div>
+                                    )}
                                 </div>
-                            </Document>
+                            </div>
                         </div>
-                    ) : null}
+                    )}
                 </div>
             </div>
         </div>

@@ -28,6 +28,9 @@ dist-ssr
 .env.local
 .env.*.local
 
+# Server caches
+.cache/
+
 # Playwright
 /test-results/
 /playwright-report/
@@ -37,3 +40,4 @@ dist-ssr
 # Local CSV / one-off imports (keep out of git)
 *-Submissions.csv
 /Labex Submit Point - Submissions.csv
+/Material List.csv
