@@ -1,0 +1,146 @@
+.scheduler-week {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+    gap: var(--spacing-sm);
+}
+
+.scheduler-week__toolbar {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--spacing-sm);
+    flex-shrink: 0;
+}
+
+.scheduler-week__machine {
+    align-self: flex-start;
+    width: 100%;
+    max-width: 14rem;
+}
+
+.scheduler-week__machine-select {
+    min-height: 44px;
+    font-weight: 600;
+    max-width: 100%;
+}
+
+.scheduler-week__nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    gap: var(--spacing-sm);
+}
+
+.scheduler-week__nav .scheduler-btn {
+    min-width: 44px;
+    min-height: 44px;
+    padding: var(--spacing-sm);
+    font-size: 1.25rem;
+}
+
+.scheduler-week__range {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    min-width: 7rem;
+    text-align: center;
+}
+
+.scheduler-week__grid {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    gap: 4px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+.scheduler-week__day {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    background: var(--bg-secondary);
+    overflow: hidden;
+}
+
+.scheduler-week__day-head {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 4px;
+    background: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border-color);
+    font-size: 0.65rem;
+}
+
+.scheduler-week__weekday {
+    color: var(--text-secondary);
+    font-weight: 600;
+}
+
+.scheduler-week__daynum {
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.scheduler-week__jobs {
+    list-style: none;
+    margin: 0;
+    padding: 4px;
+    flex: 1;
+    overflow-y: auto;
+    min-height: 4rem;
+}
+
+.scheduler-week__hint {
+    margin: 0;
+    font-size: 0.75rem;
+    color: var(--text-tertiary);
+    flex-shrink: 0;
+}
+
+.scheduler-week__grid--dragging {
+    user-select: none;
+}
+
+.scheduler-week__day--drop-target {
+    outline: 2px solid var(--accent-primary);
+    outline-offset: -2px;
+    background: color-mix(in srgb, var(--accent-primary) 10%, var(--bg-secondary));
+}
+
+.scheduler-week__day--today .scheduler-week__daynum {
+    color: var(--accent-primary);
+}
+
+.scheduler-week__job {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 6px 4px;
+    border-bottom: 1px solid var(--border-color);
+    font-size: 0.6rem;
+    border-radius: var(--radius-xs);
+    touch-action: none;
+    cursor: grab;
+}
+
+.scheduler-week__job--dragging {
+    opacity: 0.45;
+    cursor: grabbing;
+}
+
+.scheduler-week__job-time {
+    color: var(--text-tertiary);
+}
+
+.scheduler-week__job-label {
+    color: var(--text-primary);
+    word-break: break-word;
+}

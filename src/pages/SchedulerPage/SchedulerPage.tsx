@@ -24,8 +24,32 @@ import {
   type SchedulerJob,
 } from "../../services/api";
 import { CalendarGrid, monthNavParams } from "./CalendarGrid";
+import CalendarWeekGrid, { mondayOfWeekContaining } from "./CalendarWeekGrid";
+import { useViewportProfile } from "../../hooks/useViewportProfile";
 import type { CalendarJobItem } from "./types";
 import "./SchedulerPage.css";
+import "./SchedulerWeek.css";
+
+const SCHEDULER_CAL_MACHINE_KEY = "ps.scheduler.calendar.machineId";
+
+function readStoredSchedulerMachineId(): string | null {
+  try {
+    const v = localStorage.getItem(SCHEDULER_CAL_MACHINE_KEY)?.trim();
+    return v || null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredSchedulerMachineId(id: string | null): void {
+  try {
+    const v = id?.trim();
+    if (v) localStorage.setItem(SCHEDULER_CAL_MACHINE_KEY, v);
+    else localStorage.removeItem(SCHEDULER_CAL_MACHINE_KEY);
+  } catch {
+    /* private mode / quota */
+  }
+}
 
 const MONTH_RE = /^(\d{4})-(\d{2})$/;
 
@@ -76,13 +100,19 @@ function buildJobsByDayForJobs(
 }
 
 export default function SchedulerPage() {
+  const viewportProfile = useViewportProfile();
+  const isTouch = viewportProfile === "touch";
+  const tz = getAppTimeZone();
+
   const [jobs, setJobs] = useState<SchedulerJob[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [scheduleError, setScheduleError] = useState<string | null>(null);
   const [calendarMonth, setCalendarMonth] = useState<string>(() => {
-    const tz = getAppTimeZone();
     return formatInTimeZone(new Date(), tz, "yyyy-MM");
   });
+  const [weekStartYmd, setWeekStartYmd] = useState<string>(() =>
+    mondayOfWeekContaining(new Date(), tz)
+  );
 
   const loadJobs = useCallback(async () => {
     setLoadError(null);
@@ -98,7 +128,9 @@ export default function SchedulerPage() {
     Array<{ id: string; name: string; displayName: string }>
   >([]);
   const [machinesError, setMachinesError] = useState<string | null>(null);
-  const [selectedMachineId, setSelectedMachineId] = useState<string | null>(null);
+  const [selectedMachineId, setSelectedMachineId] = useState<string | null>(() =>
+    readStoredSchedulerMachineId()
+  );
   const [routingRules, setRoutingRules] = useState<RoutingRule[]>([]);
   const [estimatesByJobId, setEstimatesByJobId] = useState<Map<string, number | null>>(
     () => new Map()
@@ -161,14 +193,19 @@ export default function SchedulerPage() {
 
   useEffect(() => {
     if (machines.length === 0) {
-      setSelectedMachineId(null);
       return;
     }
     setSelectedMachineId((prev) => {
       if (prev && machines.some((m) => m.id === prev)) return prev;
-      return machines[0].id;
+      const stored = readStoredSchedulerMachineId();
+      if (stored && machines.some((m) => m.id === stored)) return stored;
+      return machines[0]!.id;
     });
   }, [machines]);
+
+  useEffect(() => {
+    writeStoredSchedulerMachineId(selectedMachineId);
+  }, [selectedMachineId]);
 
   useEffect(() => {
     if (jobs.length === 0 || !selectedMachineId) {
@@ -227,20 +264,32 @@ export default function SchedulerPage() {
       )}
 
       <section className="scheduler-section scheduler-section--calendar-fill">
-        <CalendarGrid
-          year={y}
-          month={m}
-          jobsByDay={jobsByDayForSelectedMachine}
-          machines={machines}
-          selectedMachineId={selectedMachineId}
-          onSelectMachine={setSelectedMachineId}
-          routingRulesConfigured={routingRules.length > 0}
-          currentMonthParam={nav.current}
-          prevMonthParam={nav.prev}
-          nextMonthParam={nav.next}
-          onMonthChange={setCalendarMonth}
-          onScheduleJobMove={onScheduleJobMove}
-        />
+        {isTouch ? (
+          <CalendarWeekGrid
+            weekStartYmd={weekStartYmd}
+            jobsByDay={jobsByDayForSelectedMachine}
+            machines={machines}
+            selectedMachineId={selectedMachineId}
+            onSelectMachine={setSelectedMachineId}
+            onWeekChange={setWeekStartYmd}
+            onScheduleJobMove={onScheduleJobMove}
+          />
+        ) : (
+          <CalendarGrid
+            year={y}
+            month={m}
+            jobsByDay={jobsByDayForSelectedMachine}
+            machines={machines}
+            selectedMachineId={selectedMachineId}
+            onSelectMachine={setSelectedMachineId}
+            routingRulesConfigured={routingRules.length > 0}
+            currentMonthParam={nav.current}
+            prevMonthParam={nav.prev}
+            nextMonthParam={nav.next}
+            onMonthChange={setCalendarMonth}
+            onScheduleJobMove={onScheduleJobMove}
+          />
+        )}
       </section>
     </div>
   );

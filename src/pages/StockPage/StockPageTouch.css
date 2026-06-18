@@ -1,0 +1,152 @@
+.stock-page--touch {
+    padding: var(--spacing-sm);
+    padding-top: max(var(--spacing-sm), env(safe-area-inset-top, 0));
+}
+
+.stock-header--touch {
+    gap: var(--spacing-sm);
+    padding: 0;
+}
+
+.stock-touch-top {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    width: 100%;
+    min-width: 0;
+}
+
+.stock-touch-top .stock-company-toggle button {
+    min-height: 44px;
+}
+
+.stock-touch-group-filters {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 8px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    padding-bottom: 2px;
+}
+
+.stock-touch-group-filters::-webkit-scrollbar {
+    display: none;
+}
+
+.stock-touch-group-btn {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 44px;
+    padding: 8px 14px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    transition:
+        background-color var(--transition-fast),
+        border-color var(--transition-fast),
+        color var(--transition-fast);
+}
+
+.stock-touch-group-btn:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+.stock-touch-group-btn.is-active {
+    border-color: color-mix(in srgb, var(--accent-primary) 50%, var(--border-color));
+    background: color-mix(in srgb, var(--accent-primary) 18%, var(--bg-secondary));
+    color: var(--text-primary);
+}
+
+.stock-search--touch {
+    flex: 0 0 auto;
+    margin-left: auto;
+    width: min(14rem, 36vw);
+    min-width: 9rem;
+    max-width: none;
+    min-height: 44px;
+    margin-bottom: 0;
+    box-sizing: border-box;
+    font-size: 0.9rem;
+    padding: 8px 12px;
+}
+
+.stock-touch-qty-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    background: rgba(0, 0, 0, 0.45);
+    display: flex;
+    align-items: flex-end;
+    padding-bottom: calc(56px + env(safe-area-inset-bottom, 0));
+}
+
+.stock-touch-qty {
+    width: 100%;
+    padding: var(--spacing-lg);
+    background: var(--bg-secondary);
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    border-top: 1px solid var(--border-color);
+}
+
+.stock-touch-qty__name {
+    margin: 0 0 var(--spacing-md);
+    font-size: 1rem;
+    font-weight: 600;
+    text-align: center;
+    color: var(--text-primary);
+}
+
+.stock-touch-qty__controls {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--spacing-md);
+    margin-bottom: var(--spacing-lg);
+}
+
+.stock-touch-qty__step {
+    width: 56px;
+    height: 56px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border-color);
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    font-size: 1.75rem;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.stock-touch-qty__input {
+    width: 5rem;
+    min-height: 56px;
+    text-align: center;
+    font-size: 1.5rem;
+    font-weight: 700;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+}
+
+.stock-touch-qty__actions {
+    display: flex;
+    gap: var(--spacing-sm);
+}
+
+.stock-touch-qty__actions .stock-btn-secondary,
+.stock-touch-qty__actions .stock-btn-primary {
+    flex: 1;
+    min-height: 48px;
+}

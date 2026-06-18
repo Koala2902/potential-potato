@@ -1,6 +1,7 @@
 import { Router } from "express";
 
 import { prisma } from "./db/prisma.js";
+import { invalidateSchedulerCatalogCache } from "./db/scheduler-catalog-cache.js";
 import { getSchedulerSyncDiagnostics } from "./scheduler/legacy-migrate.js";
 import { estimate } from "./scheduler/estimator/engine.js";
 import {
@@ -11,10 +12,12 @@ import { Prisma } from "@prisma/client";
 import {
   createMachineSchema,
   createOperationBodySchema,
+  patchScannerDeviceSchema,
   patchMachineSchema,
   updateOperationBodySchema,
 } from "../src/lib/scheduler/validations/config.ts";
 import {
+  parseSchedulerModes,
   SCHEDULER_ROUTING_KEY,
   schedulerRoutingFlowSchema,
 } from "../src/lib/scheduler/machine-routing.ts";
@@ -23,6 +26,11 @@ import {
   SWITCH_FLOW_DEFAULTS,
   SWITCH_FLOW_DEFAULTS_KEY,
 } from "./scheduler/switch-flow-defaults.js";
+import {
+  getScannerDevice,
+  listScannerDevices,
+  patchScannerDeviceRecord,
+} from "./db/scanner-devices.js";
 
 export const schedulerRouter = Router();
 
@@ -84,6 +92,102 @@ schedulerRouter.get("/config/machines", async (_req, res) => {
   }
 });
 
+schedulerRouter.get("/config/scanner-devices", async (_req, res) => {
+  try {
+    const devices = await listScannerDevices();
+    res.json(devices);
+  } catch (e) {
+    console.error("scheduler GET /config/scanner-devices:", e);
+    res.status(500).json({ error: "Failed to list scanner devices" });
+  }
+});
+
+schedulerRouter.patch("/config/scanner-devices/:deviceId", async (req, res) => {
+  try {
+    const { deviceId } = req.params;
+    const parsed = patchScannerDeviceSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.flatten() });
+      return;
+    }
+
+    const existing = await getScannerDevice(deviceId);
+    if (!existing) {
+      res.status(404).json({ error: "Scanner device not found" });
+      return;
+    }
+
+    const patch = { ...parsed.data };
+    if ("machineId" in patch && patch.machineId !== existing.machineId) {
+      if (!("modeId" in patch)) patch.modeId = null;
+      if (!("operationId" in patch)) patch.operationId = null;
+    }
+    if (patch.modeId != null) {
+      patch.operationId = null;
+    }
+    if (patch.operationId != null) {
+      patch.modeId = null;
+    }
+
+    const nextMachineId =
+      patch.machineId !== undefined ? patch.machineId : existing.machineId;
+    const nextModeId = patch.modeId !== undefined ? patch.modeId : existing.modeId;
+    const nextOperationId =
+      patch.operationId !== undefined ? patch.operationId : existing.operationId;
+
+    if (nextModeId && nextOperationId) {
+      res.status(400).json({ error: "Choose either a mode or an operation, not both" });
+      return;
+    }
+
+    if (!nextMachineId) {
+      patch.modeId = null;
+      patch.operationId = null;
+    } else {
+      const machine = await prisma.machine.findUnique({
+        where: { id: nextMachineId },
+        include: {
+          operations: {
+            orderBy: { sortOrder: "asc" },
+          },
+        },
+      });
+
+      if (!machine) {
+        res.status(400).json({ error: "Machine not found" });
+        return;
+      }
+
+      if (nextModeId) {
+        const modes = parseSchedulerModes(machine.constants);
+        if (!modes.some((mode) => mode.id === nextModeId)) {
+          res.status(400).json({ error: "Mode not found for this machine" });
+          return;
+        }
+      }
+
+      if (nextOperationId) {
+        const operation = machine.operations.find((row) => row.id === nextOperationId);
+        if (!operation) {
+          res.status(400).json({ error: "Operation not found for this machine" });
+          return;
+        }
+      }
+    }
+
+    const updated = await patchScannerDeviceRecord(deviceId, patch);
+    if (!updated) {
+      res.status(404).json({ error: "Scanner device not found" });
+      return;
+    }
+
+    res.json(updated);
+  } catch (e) {
+    console.error("scheduler PATCH /config/scanner-devices/:deviceId:", e);
+    res.status(500).json({ error: "Failed to update scanner device" });
+  }
+});
+
 schedulerRouter.post("/config/machines", async (req, res) => {
   try {
     const parsed = createMachineSchema.safeParse(req.body);
@@ -110,7 +214,7 @@ schedulerRouter.post("/config/machines", async (req, res) => {
         displayName: d.displayName,
         sortOrder: d.sortOrder,
         enabled: d.enabled ?? true,
-        constants,
+        constants: constants as Prisma.InputJsonValue,
       },
       include: {
         operations: {
@@ -119,6 +223,7 @@ schedulerRouter.post("/config/machines", async (req, res) => {
         },
       },
     });
+    invalidateSchedulerCatalogCache();
     res.status(201).json(machine);
   } catch (e: unknown) {
     if (
@@ -173,6 +278,7 @@ schedulerRouter.patch("/config/machines/:machineId", async (req, res) => {
         },
       },
     });
+    invalidateSchedulerCatalogCache();
     res.json(updated);
   } catch (e) {
     console.error("scheduler PATCH /config/machines/:machineId:", e);
@@ -218,6 +324,7 @@ schedulerRouter.post("/config/machines/:machineId/operations", async (req, res) 
         batchRule: true,
       },
     });
+    invalidateSchedulerCatalogCache();
     res.status(201).json(operation);
   } catch (e) {
     console.error("scheduler POST /config/machines/:id/operations:", e);
@@ -307,6 +414,7 @@ schedulerRouter.patch(
           batchRule: true,
         },
       });
+      invalidateSchedulerCatalogCache();
       res.json(updated);
     } catch (e) {
       console.error("scheduler PATCH /config/machines/.../operations/...:", e);
@@ -328,6 +436,7 @@ schedulerRouter.delete(
         return;
       }
       await prisma.operation.delete({ where: { id: operationId } });
+      invalidateSchedulerCatalogCache();
       res.status(204).send();
     } catch (e) {
       console.error("scheduler DELETE /config/machines/.../operations/...:", e);
@@ -467,8 +576,8 @@ schedulerRouter.post("/jobs", async (req, res) => {
         copies: d.copies ?? undefined,
         dieNumberDigital: d.dieNumberDigital ?? undefined,
         plateHeightMm: d.plateHeightMm ?? undefined,
-        switchDieInput: d.switchDieInput ?? undefined,
-        switchEstimateOutput: d.switchEstimateOutput ?? undefined,
+        switchDieInput: (d.switchDieInput ?? undefined) as Prisma.InputJsonValue | undefined,
+        switchEstimateOutput: (d.switchEstimateOutput ?? undefined) as Prisma.InputJsonValue | undefined,
         timeEstimationStatus: d.timeEstimationStatus ?? undefined,
         timeEstimationError: d.timeEstimationError ?? undefined,
         timeEstimationAt: d.timeEstimationAt

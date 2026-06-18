@@ -23,7 +23,11 @@
   function defaultApiBase() {
     var protocol = window.location.protocol || 'http:';
     var host = window.location.hostname || 'localhost';
-    return protocol + '//' + host + ':3001/api';
+    var port = window.location.port;
+    if (port) {
+      return protocol + '//' + host + ':' + port + '/api';
+    }
+    return protocol + '//' + host + '/api';
   }
 
   function getApiBase() {

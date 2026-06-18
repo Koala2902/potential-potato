@@ -3,11 +3,12 @@ import { useCallback, useEffect, useState } from "react";
 import { fetchSchedulerDiagnostics, type SchedulerDiagnostics } from "../../services/api";
 import MachineConfigSection from "./MachineConfigSection";
 import RoutingConfigSection from "./RoutingConfigSection";
+import ScannerDevicesSection from "./ScannerDevicesSection";
 import "../SchedulerPage/SchedulerPage.css";
 import "./ConfigPage.css";
 
 export default function ConfigPage() {
-  const [tab, setTab] = useState<"machine" | "routing">("machine");
+  const [tab, setTab] = useState<"machine" | "routing" | "devices">("machine");
   const [diag, setDiag] = useState<SchedulerDiagnostics | null>(null);
 
   const loadDiag = useCallback(async () => {
@@ -72,6 +73,18 @@ export default function ConfigPage() {
         <button
           type="button"
           className={
+            tab === "devices"
+              ? "config-page__subnav-btn config-page__subnav-btn--active"
+              : "config-page__subnav-btn"
+          }
+          data-testid="config-tab-devices"
+          onClick={() => setTab("devices")}
+        >
+          Devices
+        </button>
+        <button
+          type="button"
+          className={
             tab === "routing"
               ? "config-page__subnav-btn config-page__subnav-btn--active"
               : "config-page__subnav-btn"
@@ -84,6 +97,7 @@ export default function ConfigPage() {
       </nav>
 
       {tab === "machine" && <MachineConfigSection />}
+      {tab === "devices" && <ScannerDevicesSection />}
       {tab === "routing" && <RoutingConfigSection />}
     </div>
   );

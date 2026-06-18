@@ -2,62 +2,159 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Legacy Operation Scanner</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Production Suite (Tablet)</title>
   <link rel="stylesheet" href="./styles.css" />
+  <script>
+    (function () {
+      if (window.location.port !== '5174') return;
+      document.addEventListener('DOMContentLoaded', function () {
+        if (document.querySelector('.legacy-app')) {
+          var loc = window.location;
+          window.location.replace(
+            loc.protocol + '//' + loc.hostname + ':5175' + loc.pathname + loc.search + (loc.hash || '#/stock')
+          );
+        }
+      });
+    })();
+  </script>
 </head>
 <body>
-  <main class="container">
-    <h1>Legacy Operation Scanner</h1>
-    <p class="hint">
-      Minimal scanner page for older devices. Uses the same backend scan API.
-    </p>
+  <div class="legacy-app">
+    <div id="legacy-api-banner" class="legacy-api-banner hidden" role="alert"></div>
 
-    <div class="layout">
-      <aside class="left-column">
-        <section class="panel">
-          <button id="settingsToggleBtn" type="button" class="settings-toggle" aria-expanded="false">
-            Show API/Port Settings
-          </button>
-          <div id="settingsPanel" class="hidden">
-            <label for="apiBaseInput">API Base URL</label>
-            <input id="apiBaseInput" type="text" />
-            <small class="muted">Default is this host on port 3001, example: http://10.1.1.64:3001/api</small>
-          </div>
-        </section>
-
-        <section class="panel">
-          <label for="machineSelect">Machine</label>
-          <select id="machineSelect">
-            <option value="">Loading machines...</option>
-          </select>
-
-          <div id="modeWrap" class="hidden">
-            <label for="modeSelect">Mode</label>
-            <select id="modeSelect">
-              <option value="">Select mode</option>
-            </select>
-          </div>
-        </section>
-
-        <section class="panel">
-          <form id="scanForm">
-            <label for="scanInput">Scan Code</label>
-            <div class="row">
-              <input id="scanInput" type="text" autocomplete="off" placeholder="Scan or type code" />
-              <button id="submitBtn" type="submit">Submit</button>
-            </div>
-          </form>
-        </section>
-      </aside>
-
-      <section class="panel right-column">
-        <p id="statusText" class="status">Ready.</p>
-        <pre id="resultBox" class="result"></pre>
-      </section>
+    <div id="settingsPanel" class="legacy-settings hidden">
+      <label for="apiBaseInput">API base URL</label>
+      <input id="apiBaseInput" type="text" autocomplete="off" />
+      <small class="muted">Default is <code>/api</code> (same Express API on :3001). If data is missing, tap reset, keep API as <code>/api</code>, then reload.</small>
+      <button type="button" id="apiResetBtn" class="legacy-settings-reset">Reset API to /api</button>
     </div>
-  </main>
 
-  <script src="./main.js"></script>
+    <main class="legacy-main">
+      <section id="view-production" class="legacy-view" data-view="production">
+        <div id="production-loading" class="legacy-state legacy-state--loading">Loading machines…</div>
+        <div id="production-error" class="legacy-state hidden"></div>
+        <div id="production-grid" class="production-touch-grid"></div>
+
+        <div id="production-history-overlay" class="production-touch-history-overlay">
+          <div id="production-history" class="production-touch-history" role="dialog" aria-label="Job history">
+            <div class="production-touch-history__head">
+              <h3 id="production-history-title">Machine</h3>
+              <button id="production-history-close" type="button" class="production-touch-history__close" aria-label="Close">×</button>
+            </div>
+            <section id="production-history-processing-wrap" class="production-touch-history__section">
+              <h4>Processing</h4>
+              <div id="production-history-processing"></div>
+            </section>
+            <section class="production-touch-history__section">
+              <h4>Recent completed</h4>
+              <div id="production-history-completed"></div>
+            </section>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-stock" class="legacy-view is-active" data-view="stock">
+        <header class="stock-header--touch">
+          <div class="stock-touch-top">
+            <div class="stock-touch-top-row">
+              <div class="stock-company-toggle" role="group" aria-label="Material catalog">
+                <button id="stock-company-nl" type="button" class="stock-company-btn is-active">NL</button>
+                <button id="stock-company-np" type="button" class="stock-company-btn">NP</button>
+              </div>
+              <button id="settingsToggleBtn" type="button" class="legacy-settings-toggle" aria-expanded="false" aria-label="Settings" title="Settings">
+                &#9881;
+              </button>
+            </div>
+            <div id="stock-group-filters" class="stock-touch-group-filters" role="group" aria-label="Filter by group"></div>
+            <input id="stock-search" type="search" class="stock-search stock-search--touch" placeholder="Search materials…" aria-label="Filter materials" />
+          </div>
+        </header>
+        <div id="stock-notice" class="stock-notice hidden"></div>
+        <div id="stock-page-loading" class="legacy-state legacy-state--loading hidden">Loading materials…</div>
+        <div id="stock-error" class="legacy-state hidden"></div>
+        <div id="stock-ambiguous" class="stock-ambiguous hidden"></div>
+        <div class="stock-body">
+          <div class="stock-table-wrap">
+            <table class="stock-table">
+              <thead>
+                <tr>
+                  <th>Status</th>
+                  <th>Company</th>
+                  <th>Name</th>
+                  <th>Location</th>
+                  <th>Group</th>
+                  <th>Stock</th>
+                </tr>
+              </thead>
+              <tbody id="stock-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div id="stock-qty-overlay" class="stock-touch-qty-overlay">
+          <div id="stock-qty-panel" class="stock-touch-qty">
+            <p id="stock-qty-name" class="stock-touch-qty__name"></p>
+            <div class="stock-touch-qty__controls">
+              <span class="stock-touch-qty__prefix">×</span>
+              <input id="stock-qty-input" type="text" inputmode="decimal" class="stock-touch-qty__input" />
+            </div>
+            <div class="stock-touch-qty__actions">
+              <button id="stock-qty-cancel" type="button" class="stock-btn-secondary">Cancel</button>
+              <button id="stock-qty-takeout" type="button" class="stock-btn-secondary">Take out (-)</button>
+              <button id="stock-qty-stockin" type="button" class="stock-btn-primary">Stock in (+)</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <noscript>
+    <p style="padding:16px;color:#fff;background:#5c1a1a;">JavaScript is required for Production and Stock.</p>
+  </noscript>
+  <script src="./legacy-api.js"></script>
+  <script src="./stock.js"></script>
+  <script>
+    (function () {
+      var settingsToggleBtn = document.getElementById('settingsToggleBtn');
+      var settingsPanel = document.getElementById('settingsPanel');
+      LegacyApi.initApiBaseInput();
+      LegacyApi.probeConnection(function (err) {
+        if (err && String(err.message).indexOf('redirecting') === -1) {
+          LegacyApi.showApiBanner(err.message);
+        }
+      });
+      var apiResetBtn = document.getElementById('apiResetBtn');
+      if (apiResetBtn) {
+        apiResetBtn.onclick = function () {
+          try { window.localStorage.removeItem('legacy.apiBaseOverride'); } catch (e) {}
+          var input = document.getElementById('apiBaseInput');
+          if (input) input.value = '/api';
+          LegacyApi.showApiBanner('');
+          window.location.reload();
+        };
+      }
+      settingsToggleBtn.onclick = function () {
+        var hidden = settingsPanel.className.indexOf('hidden') !== -1;
+        if (hidden) {
+          settingsPanel.className = 'legacy-settings';
+          settingsToggleBtn.setAttribute('aria-expanded', 'true');
+        } else {
+          settingsPanel.className = 'legacy-settings hidden';
+          settingsToggleBtn.setAttribute('aria-expanded', 'false');
+        }
+      };
+      if (typeof LegacyStock !== 'undefined' && LegacyStock.start) {
+        LegacyStock.start();
+      } else {
+        var banner = document.getElementById('legacy-api-banner');
+        if (banner) {
+          banner.className = 'legacy-api-banner';
+          banner.textContent = 'App failed to load (old browser?). Try updating the tablet browser or contact support.';
+        }
+      }
+    })();
+  </script>
 </body>
 </html>

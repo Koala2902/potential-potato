@@ -36,9 +36,10 @@ See `.env.example`:
 | `PDF_ARCHIVE_PATH` | `/Volumes/Daily Print Jobs/_NEXT HotFolder/RDevArchive` | Mounted folder for `{imposition_id}.pdf` files |
 | `PDF_ARCHIVE_YEAR_FOLDERS` | current year + two prior | Year subfolders to search under the archive |
 | `PDF_ARCHIVE_TRY_YEAR_SUBFOLDERS` | `true` | Set `false` to only check the flat archive path |
-| `PDF_THUMBNAIL_CACHE_DIR` | `.cache/pdf-thumbnails` | Disk cache for master PNG + WebP files |
+| `PDF_THUMBNAIL_CACHE_DIR` | `<PDF_ARCHIVE_PATH>/.thumb-cache` | Disk cache for master PNG + WebP files |
 
-Use a POSIX path after mounting the SMB share (`smb://` URLs do not work with Node `fs`).
+Use a POSIX path after mounting the SMB share (`smb://` URLs do not work with Node `fs`).  
+If the configured thumbnail cache path is unavailable, thumbnail requests fail with `503` (no local fallback).
 
 ## Caching
 
@@ -60,5 +61,6 @@ Thumbnails are warmed in the background after a successful barcode scan resolves
 |---------|----------------|
 | “Preview renderer unavailable” | `pdftoppm` not on PATH — install poppler-utils and restart the API server |
 | “PDF not found in archive” | File missing under `PDF_ARCHIVE_PATH` (flat or year subfolder) |
-| Stretched / wrong aspect ratio | Stale cache from an older rasterizer; delete `.cache/pdf-thumbnails/` or bump `CACHE_VERSION` |
+| Stretched / wrong aspect ratio | Stale cache from an older rasterizer; delete thumbnail cache files under `<PDF_ARCHIVE_PATH>/.thumb-cache` (or your override) or bump `CACHE_VERSION` |
+| “PDF thumbnail cache unavailable” | Cache path not mounted/writable; verify `PDF_THUMBNAIL_CACHE_DIR` (or archive mount) exists and is writable |
 | Slow first load (~0.5s) | Normal on cache miss (SMB read + rasterize); repeat views should be &lt;50ms |

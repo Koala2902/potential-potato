@@ -25,7 +25,7 @@ A sophisticated job tracking system for print production workflows with USB scan
 - **Frontend**: React 18 + TypeScript + Vite
 - **Styling**: Vanilla CSS with custom design system
 - **Icons**: Lucide React
-- **PDF Handling**: Server-generated WebP thumbnails (Poppler + Sharp) — see [docs/pdf-preview.md](docs/pdf-preview.md)
+- **PDF Handling**: Server-generated WebP thumbnails (Poppler + Sharp)
 
 ## Getting Started
 
@@ -49,6 +49,44 @@ npm run dev
 ```
 
 The application will be available at `http://localhost:5173`
+
+### Old tablets (legacy UI on port 5175)
+
+The main app uses React 19 and modern JavaScript, which may not run on very old tablets. Use the lightweight legacy UI instead. It shares the **same Express API on port 3001** as `npm run dev` (tablet Vite on 5175 proxies `/api` there).
+
+```bash
+npm run dev          # terminal 1 — API + main UI
+npm run dev:tablet   # terminal 2 — tablet UI only
+```
+
+Bookmark on the tablet (replace with your machine’s LAN IP):
+
+- `http://10.1.1.64:5175/#/production`
+- `http://10.1.1.64:5175/#/stock`
+
+See [legacy/README.md](legacy/README.md) for details.
+
+### Phone access and camera (HTTPS via Cloudflare)
+
+Mobile browsers only allow the camera on **HTTPS** (or `localhost`). To open the app from a phone when the dev machine is on your LAN (e.g. `10.1.1.64`), use **Cloudflare Tunnel** so you get a temporary `https://…` URL that proxies to Vite on your machine.
+
+1. **Install `cloudflared`** (pick one):
+   - macOS: `brew install cloudflare/cloudflare/cloudflared`
+   - Other platforms: [Cloudflare downloads](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)
+2. **Start the app** (Vite + API, default Vite port **5173**):
+   - `npm run dev`
+3. **In a second terminal**, start the tunnel:
+   - `npm run tunnel`
+4. In the tunnel output, copy the URL that looks like **`https://….trycloudflare.com`** and open it on your phone.
+5. In the browser, allow **Camera** for that site when prompted.
+
+**One command** (starts dev + tunnel; tunnel waits a few seconds for Vite to listen):
+
+```bash
+npm run dev:phone
+```
+
+If Vite is not on port 5173, run `cloudflared tunnel --url http://127.0.0.1:<your-port>` manually instead of `npm run tunnel`.
 
 ## Usage
 

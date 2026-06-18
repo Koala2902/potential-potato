@@ -1,0 +1,336 @@
+/* Touch-primary layout (html[data-viewport="touch"]) — desktop rules unchanged */
+
+[data-viewport='touch'] {
+    --touch-tap-min: 44px;
+    --touch-font-bump: 0.05rem;
+}
+
+[data-viewport='touch'] body {
+    font-size: calc(1rem + var(--touch-font-bump));
+}
+
+[data-viewport='touch'] .app {
+    padding-bottom: env(safe-area-inset-bottom, 0);
+}
+
+[data-viewport='touch'] .app-header {
+    display: none;
+}
+
+[data-viewport='touch'] .app-content {
+    padding-top: max(0px, env(safe-area-inset-top, 0));
+    padding-bottom: calc(56px + env(safe-area-inset-bottom, 0));
+}
+
+[data-viewport='touch'] .production-header,
+[data-viewport='touch'] .production-title,
+[data-viewport='touch'] .stock-title,
+[data-viewport='touch'] .analytics-header,
+[data-viewport='touch'] .analytics-title,
+[data-viewport='touch'] .scheduler-cal__toolbar,
+[data-viewport='touch'] .scheduler-cal__footnote,
+[data-viewport='touch'] .scheduler-cal__machine-row {
+    display: none !important;
+}
+
+[data-viewport='touch'] .navigation {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 100;
+    padding: var(--spacing-xs) max(var(--spacing-sm), env(safe-area-inset-left, 0))
+        max(var(--spacing-xs), env(safe-area-inset-bottom, 0))
+        max(var(--spacing-sm), env(safe-area-inset-right, 0));
+    border-bottom: none;
+    border-top: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.35);
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    gap: 2px;
+    justify-content: flex-start;
+}
+
+[data-viewport='touch'] .navigation::-webkit-scrollbar {
+    display: none;
+}
+
+[data-viewport='touch'] .nav-tab {
+    flex: 1 1 0;
+    flex-direction: column;
+    gap: 2px;
+    min-height: var(--touch-tap-min);
+    min-width: 0;
+    padding: var(--spacing-xs) var(--spacing-xs);
+    border-bottom: none;
+    border-radius: var(--radius-md);
+    font-size: 0.65rem;
+}
+
+[data-viewport='touch'] .navigation {
+    justify-content: stretch;
+}
+
+[data-viewport='touch'] .nav-tab.active {
+    background: var(--bg-tertiary);
+    border-bottom: none;
+}
+
+[data-viewport='touch'] .nav-tab.active::before {
+    display: none;
+}
+
+[data-viewport='touch'] .nav-tab svg {
+    width: 20px;
+    height: 20px;
+}
+
+[data-viewport='touch'] .stock-btn-primary,
+[data-viewport='touch'] .stock-btn-secondary,
+[data-viewport='touch'] .stock-tab,
+[data-viewport='touch'] button.stock-link-btn {
+    min-height: var(--touch-tap-min);
+}
+
+[data-viewport='touch'] .stock-table tbody tr {
+    min-height: var(--touch-tap-min);
+}
+
+[data-viewport='touch'] .stock-table tbody td {
+    padding-top: 12px;
+    padding-bottom: 12px;
+}
+
+[data-viewport='touch'] .ticket-touch-segment {
+    display: flex;
+    gap: var(--spacing-xs);
+    padding: var(--spacing-sm);
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border-color);
+    flex-shrink: 0;
+}
+
+[data-viewport='touch'] .ticket-touch-segment button {
+    flex: 1;
+    min-height: var(--touch-tap-min);
+    padding: var(--spacing-sm);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+[data-viewport='touch'] .ticket-touch-segment button.is-active {
+    background: var(--accent-primary);
+    border-color: var(--accent-primary);
+    color: white;
+}
+
+[data-viewport='touch'] .ticket-page {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+}
+
+[data-viewport='touch'] .ticket-page .left-panel,
+[data-viewport='touch'] .ticket-page .middle-panel,
+[data-viewport='touch'] .ticket-page .right-panel {
+    grid-column: unset;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    display: none;
+}
+
+[data-viewport='touch'] .ticket-page[data-touch-panel='queue'] .left-panel,
+[data-viewport='touch'] .ticket-page[data-touch-panel='viewer'] .middle-panel,
+[data-viewport='touch'] .ticket-page[data-touch-panel='details'] .right-panel {
+    display: flex;
+    flex-direction: column;
+}
+
+[data-viewport='touch'] .production-machines-grid {
+    display: none;
+}
+
+[data-viewport='touch'] .job-page__controls--touch {
+    flex-direction: row;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: var(--spacing-sm);
+}
+
+[data-viewport='touch'] .job-page__controls--touch .job-page__search {
+    flex: 1;
+    min-width: 0;
+    width: auto;
+}
+
+[data-viewport='touch'] .production-page .machine-production-card button {
+    min-height: var(--touch-tap-min);
+}
+
+[data-viewport='touch'] .job-page__controls {
+    flex-direction: column;
+    align-items: stretch;
+}
+
+[data-viewport='touch'] .job-page__controls input,
+[data-viewport='touch'] .job-page__controls select,
+[data-viewport='touch'] .job-page__controls button {
+    min-height: var(--touch-tap-min);
+    width: 100%;
+}
+
+[data-viewport='touch'] .analytics-grid {
+    grid-template-columns: 1fr;
+}
+
+[data-viewport='touch'] .analytics-card--wide,
+[data-viewport='touch'] .analytics-card--full {
+    grid-column: 1 / -1;
+}
+
+[data-viewport='touch'] .analytics-preset-btn {
+    min-height: var(--touch-tap-min);
+}
+
+[data-viewport='touch'] .analytics-header {
+    flex-direction: column;
+    align-items: stretch;
+}
+
+[data-viewport='touch'] .config-page {
+    max-width: none;
+    padding: var(--spacing-md);
+}
+
+[data-viewport='touch'] .config-page input,
+[data-viewport='touch'] .config-page select,
+[data-viewport='touch'] .config-page button,
+[data-viewport='touch'] .config-page__subnav-btn {
+    min-height: var(--touch-tap-min);
+}
+
+[data-viewport='touch'] .config-page__subnav {
+    flex-wrap: wrap;
+}
+
+[data-viewport='touch'] .scheduler-page {
+    padding: var(--spacing-md);
+    padding-left: max(var(--spacing-md), env(safe-area-inset-left, 0));
+    padding-right: max(var(--spacing-md), env(safe-area-inset-right, 0));
+}
+
+[data-viewport='touch'] .scheduler-page button,
+[data-viewport='touch'] .scheduler-cal__day {
+    min-height: var(--touch-tap-min);
+}
+
+[data-viewport='touch'] .production-page {
+    padding: var(--spacing-md);
+}
+
+[data-viewport='touch'] .job-page {
+    padding: var(--spacing-sm);
+}
+
+[data-viewport='touch'] .job-page table {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+/* Stock: bottom sheet sidebar + full-screen modals */
+[data-viewport='touch'] .stock-body {
+    grid-template-columns: 1fr;
+}
+
+[data-viewport='touch'] .stock-tabs {
+    flex-wrap: wrap;
+    gap: var(--spacing-xs);
+}
+
+[data-viewport='touch'] .stock-tab {
+    flex: 1 1 auto;
+    min-width: 5rem;
+    justify-content: center;
+    font-size: 0.85rem;
+    padding: var(--spacing-sm) var(--spacing-md);
+}
+
+[data-viewport='touch'] .stock-side-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 140;
+    background: rgba(0, 0, 0, 0.45);
+}
+
+[data-viewport='touch'] .stock-side {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: calc(56px + env(safe-area-inset-bottom, 0));
+    z-index: 150;
+    max-height: min(70vh, 520px);
+    margin: 0;
+    padding: var(--spacing-md);
+    padding-top: var(--spacing-lg);
+    border: 1px solid var(--border-color);
+    border-bottom: none;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    background: var(--bg-secondary);
+    box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.4);
+    transform: translateY(110%);
+    transition: transform var(--transition-base);
+    pointer-events: none;
+}
+
+[data-viewport='touch'] .stock-side.stock-side--open {
+    transform: translateY(0);
+    pointer-events: auto;
+}
+
+[data-viewport='touch'] .stock-side-close {
+    position: absolute;
+    top: var(--spacing-sm);
+    right: var(--spacing-sm);
+    min-height: var(--touch-tap-min);
+    min-width: var(--touch-tap-min);
+    padding: var(--spacing-sm) var(--spacing-md);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+[data-viewport='touch'] .stock-modal-overlay {
+    align-items: flex-end;
+    padding: 0;
+}
+
+[data-viewport='touch'] .stock-modal {
+    width: 100%;
+    max-width: none;
+    max-height: min(92vh, 900px);
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    margin-bottom: calc(56px + env(safe-area-inset-bottom, 0));
+}
+
+[data-viewport='touch'] .stock-header {
+    flex-wrap: wrap;
+    gap: var(--spacing-sm);
+}
+
+[data-viewport='touch'] .stock-controls {
+    flex-wrap: wrap;
+}

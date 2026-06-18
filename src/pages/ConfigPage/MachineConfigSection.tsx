@@ -4,6 +4,7 @@ import {
   LINE_SPEED_PARAM_KEY,
   SETUP_TIME_PARAM_KEY,
   parseSchedulerModes,
+  randomUuidV4,
   type SchedulerMode,
 } from "../../lib/scheduler/machine-routing";
 import type { BatchRuleBodyInput, OperationParamRowInput } from "../../lib/scheduler/validations/config";
@@ -430,9 +431,15 @@ function MachineCard({
   const [modeDraft, setModeDraft] = useState<SchedulerMode[] | null>(null);
   const draft = modeDraft ?? modes;
 
+  /** Stable fingerprint so we do not reset the draft on every fetch (new object reference). */
+  const constantsFingerprint = useMemo(
+    () => JSON.stringify(machine.constants ?? null),
+    [machine.constants]
+  );
+
   useEffect(() => {
     setModeDraft(null);
-  }, [machine.id, machine.constants]);
+  }, [machine.id, constantsFingerprint]);
 
   const opsSorted = useMemo(() => {
     const ops = [...(machine.operations ?? [])];
@@ -450,7 +457,7 @@ function MachineCard({
 
   function addMode() {
     const next: SchedulerMode = {
-      id: crypto.randomUUID(),
+      id: randomUuidV4(),
       name: "New mode",
       operationIds: [],
     };

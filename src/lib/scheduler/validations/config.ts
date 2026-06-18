@@ -68,3 +68,14 @@ export const patchMachineSchema = z.object({
 });
 
 export type PatchMachineInput = z.infer<typeof patchMachineSchema>;
+
+export const patchScannerDeviceSchema = z.object({
+  label: z.string().optional().nullable(),
+  enabled: z.coerce.boolean().optional(),
+  machineId: z.string().uuid().optional().nullable(),
+  modeId: z.string().uuid().optional().nullable(),
+  operationId: z.string().uuid().optional().nullable(),
+  notes: z.string().optional().nullable(),
+});
+
+export type PatchScannerDeviceInput = z.infer<typeof patchScannerDeviceSchema>;

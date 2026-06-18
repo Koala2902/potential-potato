@@ -3,7 +3,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import logsPool from './connection.js';
 import { appPool } from './app-connection.js';
-import { getLogsDatabaseUrl, getAppDatabaseUrl } from './database-config.js';
+import { getLogsDatabaseUrl, getAppDatabaseUrl, getPrintOsDatabaseUrl } from './database-config.js';
+import { getPrintOsPool } from './print-os-pool.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -119,6 +120,137 @@ async function main() {
         await runMigration(path.join(migrationsDir, '031-operation-duration-first-last-30h-window.sql'), 'logs');
         await runMigration(path.join(migrationsDir, '033-operation-duration-end-mirrors-start.sql'), 'logs');
         await runMigration(path.join(migrationsDir, '034-job-status-view-op005-op006-status.sql'), pipe);
+        await runMigration(path.join(migrationsDir, '035-operation-duration-store-utc-naive.sql'), 'logs');
+        await runMigration(path.join(migrationsDir, '036-operation-duration-single-scan-next-job-fallback.sql'), 'logs');
+        await runMigration(path.join(migrationsDir, '037-operation-duration-short-span-next-job-fallback.sql'), 'logs');
+        await runMigration(path.join(migrationsDir, '043-operation-duration-latest-session-only.sql'), 'logs');
+
+        const materialsBarcodeSql = fs.readFileSync(
+            path.join(migrationsDir, '038-materials-barcodes.sql'),
+            'utf-8'
+        );
+        await runSqlOnDatabase(
+            materialsBarcodeSql,
+            '038-materials-barcodes.sql (app: public.materials barcodes when table exists)',
+            'app'
+        );
+        {
+            const printClient = await getPrintOsPool().connect();
+            try {
+                const stockDbLabel = getPrintOsDatabaseUrl()?.trim()
+                    ? 'JOBMANAGER_DATABASE_URL (stock / print-os)'
+                    : 'app pool (same as DATABASE_URL; JOBMANAGER unset)';
+                console.log(`\nRunning 038-materials-barcodes.sql on ${stockDbLabel}...`);
+                await printClient.query(materialsBarcodeSql);
+                console.log('✓ 038-materials-barcodes.sql (stock connection) completed');
+            } catch (error: any) {
+                const errorMsg = error.message || String(error);
+                if (isBenignMigrationError(errorMsg)) {
+                    console.log(`⚠ 038 stock connection: ${errorMsg.split('\n')[0]}`);
+                } else {
+                    console.error(`✗ 038 stock connection failed:`, errorMsg);
+                    throw error;
+                }
+            } finally {
+                printClient.release();
+            }
+        }
+
+        const materialStockMovementsSql = fs.readFileSync(
+            path.join(migrationsDir, '039-material-stock-movements.sql'),
+            'utf-8'
+        );
+        await runSqlOnDatabase(
+            materialStockMovementsSql,
+            '039-material-stock-movements.sql (app: movement log when materials exists)',
+            'app'
+        );
+        {
+            const printClient039 = await getPrintOsPool().connect();
+            try {
+                const stockDbLabel = getPrintOsDatabaseUrl()?.trim()
+                    ? 'JOBMANAGER_DATABASE_URL (stock / print-os)'
+                    : 'app pool (same as DATABASE_URL; JOBMANAGER unset)';
+                console.log(`\nRunning 039-material-stock-movements.sql on ${stockDbLabel}...`);
+                await printClient039.query(materialStockMovementsSql);
+                console.log('✓ 039-material-stock-movements.sql (stock connection) completed');
+            } catch (error: any) {
+                const errorMsg = error.message || String(error);
+                if (isBenignMigrationError(errorMsg)) {
+                    console.log(`⚠ 039 stock connection: ${errorMsg.split('\n')[0]}`);
+                } else {
+                    console.error(`✗ 039 stock connection failed:`, errorMsg);
+                    throw error;
+                }
+            } finally {
+                printClient039.release();
+            }
+        }
+
+        const materialsLocationSql = fs.readFileSync(
+            path.join(migrationsDir, '040-materials-location.sql'),
+            'utf-8'
+        );
+        await runSqlOnDatabase(
+            materialsLocationSql,
+            '040-materials-location.sql (app: public.materials.location when table exists)',
+            'app'
+        );
+        {
+            const printClient040 = await getPrintOsPool().connect();
+            try {
+                const stockDbLabel = getPrintOsDatabaseUrl()?.trim()
+                    ? 'JOBMANAGER_DATABASE_URL (stock / print-os)'
+                    : 'app pool (same as DATABASE_URL; JOBMANAGER unset)';
+                console.log(`\nRunning 040-materials-location.sql on ${stockDbLabel}...`);
+                await printClient040.query(materialsLocationSql);
+                console.log('✓ 040-materials-location.sql (stock connection) completed');
+            } catch (error: any) {
+                const errorMsg = error.message || String(error);
+                if (isBenignMigrationError(errorMsg)) {
+                    console.log(`⚠ 040 stock connection: ${errorMsg.split('\n')[0]}`);
+                } else {
+                    console.error(`✗ 040 stock connection failed:`, errorMsg);
+                    throw error;
+                }
+            } finally {
+                printClient040.release();
+            }
+        }
+
+        const materialGroupMembershipsSql = fs.readFileSync(
+            path.join(migrationsDir, '041-material-group-memberships.sql'),
+            'utf-8'
+        );
+        await runSqlOnDatabase(
+            materialGroupMembershipsSql,
+            '041-material-group-memberships.sql (app: material ↔ group memberships)',
+            'app'
+        );
+        {
+            const printClient041 = await getPrintOsPool().connect();
+            try {
+                const stockDbLabel = getPrintOsDatabaseUrl()?.trim()
+                    ? 'JOBMANAGER_DATABASE_URL (stock / print-os)'
+                    : 'app pool (same as DATABASE_URL; JOBMANAGER unset)';
+                console.log(`\nRunning 041-material-group-memberships.sql on ${stockDbLabel}...`);
+                await printClient041.query(materialGroupMembershipsSql);
+                console.log('✓ 041-material-group-memberships.sql (stock connection) completed');
+            } catch (error: any) {
+                const errorMsg = error.message || String(error);
+                if (isBenignMigrationError(errorMsg)) {
+                    console.log(`⚠ 041 stock connection: ${errorMsg.split('\n')[0]}`);
+                } else {
+                    console.error(`✗ 041 stock connection failed:`, errorMsg);
+                    throw error;
+                }
+            } finally {
+                printClient041.release();
+            }
+        }
+
+        await runMigration(path.join(migrationsDir, '042-job-lane-overrides.sql'), pipe);
+        await runMigration(path.join(migrationsDir, '044-scanner-devices.sql'), 'app');
 
         console.log('\n=== Migration Summary ===');
         console.log('✓ All migrations completed successfully!');

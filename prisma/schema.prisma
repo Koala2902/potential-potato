@@ -22,6 +22,7 @@ model Machine {
   constants   Json     @default("{}")
   operations  Operation[]
   jobSchedules JobMachineSchedule[]
+  scannerDevices ScannerDevice[]
 
   @@schema("scheduler")
 }
@@ -30,6 +31,8 @@ model Operation {
   id          String   @id @default(uuid())
   machineId   String
   machine     Machine  @relation(fields: [machineId], references: [id], onDelete: Cascade)
+  /// Planner / imposition_operations.operation_id (e.g. op001). Distinct from primary `id` when using UUID PKs.
+  plannerOperationId String? @map("operation_id")
   name        String
   type        String
   sortOrder   Int
@@ -182,5 +185,26 @@ model JobMachineSchedule {
   scheduledDate   DateTime
 
   @@unique([jobId, machineId])
+  @@schema("scheduler")
+}
+
+model ScannerDevice {
+  deviceId   String   @id @map("device_id")
+  label      String?
+  hostname   String?
+  enabled    Boolean  @default(true)
+  machineId  String?  @map("machine_id")
+  machine    Machine? @relation(fields: [machineId], references: [id], onDelete: SetNull)
+  modeId     String?  @map("mode_id")
+  operationId String? @map("operation_id")
+  notes      String?
+  lastSeenAt DateTime? @map("last_seen_at")
+  lastSeenIp String?  @map("last_seen_ip")
+  lastScanAt DateTime? @map("last_scan_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@index([machineId])
+  @@map("scanner_devices")
   @@schema("scheduler")
 }

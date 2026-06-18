@@ -5,6 +5,7 @@ import {
   findMatchingRoutingRule,
   parseSchedulerModes,
   parseSchedulerRoutingFlow,
+  randomUuidV4,
   type MachineLike,
   type RoutingRule,
   type SchedulerRoutingFlow,
@@ -89,7 +90,7 @@ export default function RoutingConfigSection() {
 
   function addRule() {
     const rule: RoutingRule = {
-      id: crypto.randomUUID(),
+      id: randomUuidV4(),
       match: { kind: "exact", productionPath: "" },
       steps: [],
     };

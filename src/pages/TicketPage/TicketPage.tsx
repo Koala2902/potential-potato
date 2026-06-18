@@ -13,9 +13,37 @@ import {
     fetchOperations,
     Machine,
     type ScanCatalogOperation,
+    isMaterialStockScan,
 } from '../../services/api';
 import { Settings, ChevronDown, AlertCircle, X, Package, Hash, FileText } from 'lucide-react';
+import { useViewportProfile } from '../../hooks/useViewportProfile';
 import './TicketPage.css';
+
+const TICKET_SCAN_PREFS_KEY = 'ps.ticket.scan';
+
+type TicketScanPrefs = { machineId: string; modeId: string };
+
+function loadTicketScanPrefs(): TicketScanPrefs {
+    try {
+        const raw = localStorage.getItem(TICKET_SCAN_PREFS_KEY);
+        if (!raw) return { machineId: '', modeId: '' };
+        const o = JSON.parse(raw) as Partial<TicketScanPrefs>;
+        return {
+            machineId: typeof o.machineId === 'string' ? o.machineId : '',
+            modeId: typeof o.modeId === 'string' ? o.modeId : '',
+        };
+    } catch {
+        return { machineId: '', modeId: '' };
+    }
+}
+
+function saveTicketScanPrefs(prefs: TicketScanPrefs): void {
+    try {
+        localStorage.setItem(TICKET_SCAN_PREFS_KEY, JSON.stringify(prefs));
+    } catch {
+        /* private mode / quota */
+    }
+}
 
 function catalogOpInMode(op: ScanCatalogOperation, mode: SchedulerMode): boolean {
     const want = new Set(mode.operationIds.map((x) => x.trim().toLowerCase()));
@@ -24,7 +52,18 @@ function catalogOpInMode(op: ScanCatalogOperation, mode: SchedulerMode): boolean
     return want.has(sched) || (planner != null && want.has(planner));
 }
 
-export default function TicketPage() {
+export interface TicketPageProps {
+    /** When a scan matches a material barcode, parent switches to Stock for stock take. */
+    onMaterialStockScan?: (materialId: string) => void;
+}
+
+type TicketTouchPanel = 'queue' | 'viewer' | 'details';
+
+export default function TicketPage({ onMaterialStockScan }: TicketPageProps) {
+    const viewportProfile = useViewportProfile();
+    const isTouch = viewportProfile === 'touch';
+    const [touchPanel, setTouchPanel] = useState<TicketTouchPanel>('queue');
+
     const [queue, setQueue] = useState<ProductionQueueItem[]>([]);
     const [selectedImposition, setSelectedImposition] = useState<ImpositionItem | null>(null);
     const [impositionDetails, setImpositionDetails] = useState<ImpositionDetails | null>(null);
@@ -38,7 +77,9 @@ export default function TicketPage() {
     const scanTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
     const [machines, setMachines] = useState<Machine[]>([]);
-    const [selectedMachineId, setSelectedMachineId] = useState<string>('');
+    const [selectedMachineId, setSelectedMachineId] = useState<string>(
+        () => loadTicketScanPrefs().machineId
+    );
     const [selectedMachine, setSelectedMachine] = useState<Machine | null>(null);
     const [schedulerModes, setSchedulerModes] = useState<SchedulerMode[]>([]);
     const [catalogOps, setCatalogOps] = useState<ScanCatalogOperation[]>([]);
@@ -82,6 +123,22 @@ export default function TicketPage() {
     }, []);
 
     useEffect(() => {
+        if (machines.length === 0) return;
+        if (!selectedMachineId.trim()) {
+            setSelectedMachine(null);
+            return;
+        }
+        const m = machines.find((x) => x.machine_id === selectedMachineId);
+        if (m) {
+            setSelectedMachine(m);
+        } else {
+            setSelectedMachineId('');
+            setSelectedMachine(null);
+            saveTicketScanPrefs({ machineId: '', modeId: '' });
+        }
+    }, [machines, selectedMachineId]);
+
+    useEffect(() => {
         if (!selectedMachineId.trim()) {
             setSchedulerModes([]);
             setCatalogOps([]);
@@ -95,16 +152,26 @@ export default function TicketPage() {
                     fetchSchedulerModes(selectedMachineId),
                     fetchOperations(selectedMachineId),
                 ]);
-                if (!cancelled) {
-                    setSchedulerModes(modes);
-                    setCatalogOps(ops);
-                    setSelectedModeId('');
+                if (cancelled) return;
+                setSchedulerModes(modes);
+                setCatalogOps(ops);
+                const prefs = loadTicketScanPrefs();
+                const restored =
+                    prefs.machineId === selectedMachineId &&
+                    prefs.modeId &&
+                    modes.some((mode) => mode.id === prefs.modeId)
+                        ? prefs.modeId
+                        : '';
+                setSelectedModeId(restored);
+                if (prefs.machineId === selectedMachineId && prefs.modeId && !restored) {
+                    saveTicketScanPrefs({ machineId: selectedMachineId, modeId: '' });
                 }
             } catch (err) {
                 console.error('Error loading scan catalog:', err);
                 if (!cancelled) {
                     setSchedulerModes([]);
                     setCatalogOps([]);
+                    setSelectedModeId('');
                 }
             }
         })();
@@ -172,11 +239,23 @@ export default function TicketPage() {
             setError(null);
             setNotification(null);
 
-            const { runlistId, queue: filteredQueue, scannedImpositionId } = await processScan(
+            const result = await processScan(
                 scanValue,
                 selectedMachineId || null,
                 [payloadOpId]
             );
+
+            if (isMaterialStockScan(result)) {
+                onMaterialStockScan?.(result.materialId);
+                setNotification({
+                    message: `Material barcode — opening stock for ${String(result.material.material_name ?? result.materialId)}`,
+                    type: 'success',
+                });
+                scanBufferRef.current = '';
+                return true;
+            }
+
+            const { runlistId, queue: filteredQueue, scannedImpositionId } = result;
 
             setQueue(filteredQueue);
             setHasScanned(true);
@@ -226,6 +305,7 @@ export default function TicketPage() {
         schedulerModes.length,
         selectedModeId,
         resolveScanPayloadOperationId,
+        onMaterialStockScan,
     ]);
 
     useEffect(() => {
@@ -340,7 +420,6 @@ export default function TicketPage() {
         }
     };
 
-
     const nextImpositionId = useMemo(() => {
         if (!selectedImposition) return null;
         const flat = queue.flatMap((item) =>
@@ -355,6 +434,7 @@ export default function TicketPage() {
 
     const handleSelectImposition = (imposition: ImpositionItem, _runlistId: string) => {
         setSelectedImposition(imposition);
+        if (isTouch) setTouchPanel('viewer');
     };
 
     const handleManualScanSubmit = async (e: React.FormEvent) => {
@@ -398,8 +478,41 @@ export default function TicketPage() {
         );
     }
 
+    const touchPanelAttr = isTouch ? touchPanel : undefined;
+
     return (
-        <div className="ticket-page">
+        <div className="ticket-page" data-touch-panel={touchPanelAttr}>
+            {isTouch ? (
+                <div className="ticket-touch-segment" role="tablist" aria-label="Operation panels">
+                    <button
+                        type="button"
+                        role="tab"
+                        aria-selected={touchPanel === 'queue'}
+                        className={touchPanel === 'queue' ? 'is-active' : ''}
+                        onClick={() => setTouchPanel('queue')}
+                    >
+                        Queue
+                    </button>
+                    <button
+                        type="button"
+                        role="tab"
+                        aria-selected={touchPanel === 'viewer'}
+                        className={touchPanel === 'viewer' ? 'is-active' : ''}
+                        onClick={() => setTouchPanel('viewer')}
+                    >
+                        Viewer
+                    </button>
+                    <button
+                        type="button"
+                        role="tab"
+                        aria-selected={touchPanel === 'details'}
+                        className={touchPanel === 'details' ? 'is-active' : ''}
+                        onClick={() => setTouchPanel('details')}
+                    >
+                        Details
+                    </button>
+                </div>
+            ) : null}
             <div className="left-panel">
                 <form className="manual-scan-bar" onSubmit={handleManualScanSubmit}>
                     <label className="manual-scan-bar__label" htmlFor="manual-scan-input">
@@ -495,6 +608,7 @@ export default function TicketPage() {
                                         setSelectedMachine(
                                             machines.find((m) => m.machine_id === machineId) || null
                                         );
+                                        saveTicketScanPrefs({ machineId, modeId: '' });
                                     }}
                                     onClick={(e) => e.stopPropagation()}
                                     style={{
@@ -536,7 +650,12 @@ export default function TicketPage() {
                                         <select
                                             value={selectedModeId}
                                             onChange={(e) => {
-                                                setSelectedModeId(e.target.value);
+                                                const modeId = e.target.value;
+                                                setSelectedModeId(modeId);
+                                                saveTicketScanPrefs({
+                                                    machineId: selectedMachineId,
+                                                    modeId,
+                                                });
                                             }}
                                             onClick={(ev) => ev.stopPropagation()}
                                             style={{

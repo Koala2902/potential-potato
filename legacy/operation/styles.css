@@ -1,0 +1,154 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: Arial, sans-serif;
+  background: #000;
+  color: #fff;
+}
+
+.container {
+  width: 100%;
+  margin: 0;
+  padding: 12px;
+}
+
+h1 {
+  margin: 0 0 10px;
+  font-size: 24px;
+}
+
+.hint {
+  margin: 0 0 16px;
+  color: #d5d5d5;
+}
+
+.layout {
+  display: flex;
+  gap: 12px;
+  min-height: calc(100vh - 90px);
+}
+
+.left-column {
+  width: 20%;
+  min-width: 240px;
+}
+
+.right-column {
+  width: 80%;
+  min-height: 100%;
+}
+
+.panel {
+  background: #0e0e0e;
+  border: 1px solid #2b2b2b;
+  border-radius: 6px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+label {
+  display: block;
+  font-weight: bold;
+  margin-bottom: 6px;
+}
+
+input,
+select,
+button {
+  font-size: 16px;
+}
+
+input,
+select {
+  width: 100%;
+  padding: 8px;
+  border: 1px solid #3a3a3a;
+  border-radius: 4px;
+  background: #111;
+  color: #fff;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+}
+
+.row input {
+  flex: 1;
+}
+
+button {
+  min-width: 110px;
+  border: 1px solid #4a4a4a;
+  background: #1a1a1a;
+  color: #fff;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.settings-toggle {
+  width: 100%;
+  min-width: 0;
+  text-align: left;
+  padding: 8px 10px;
+}
+
+#settingsPanel {
+  margin-top: 10px;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.status {
+  margin: 0 0 8px;
+  font-weight: bold;
+}
+
+.status.error {
+  color: #ff6b6b;
+}
+
+.status.success {
+  color: #69db7c;
+}
+
+.result {
+  margin: 0;
+  padding: 10px;
+  min-height: 96px;
+  background: #050505;
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 13px;
+}
+
+.muted {
+  display: inline-block;
+  margin-top: 4px;
+  color: #aaa;
+}
+
+.hidden {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  .layout {
+    display: block;
+    min-height: 0;
+  }
+
+  .left-column,
+  .right-column {
+    width: 100%;
+    min-width: 0;
+  }
+}

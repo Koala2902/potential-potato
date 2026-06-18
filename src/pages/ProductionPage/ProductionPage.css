@@ -33,6 +33,7 @@
     grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
     gap: var(--spacing-lg);
     flex: 1;
+    align-items: stretch;
 }
 
 .machine-production-card {
@@ -43,7 +44,12 @@
     display: flex;
     flex-direction: column;
     gap: var(--spacing-md);
-    transition: all var(--transition-base);
+    height: 100%;
+    /* Avoid transitioning “all”: content updates were animating every property and looked like a flash */
+    transition:
+        border-color var(--transition-base),
+        box-shadow var(--transition-base),
+        transform var(--transition-base);
 }
 
 .machine-production-card:hover {
@@ -94,15 +100,17 @@
     grid-template-columns: repeat(2, 1fr);
     gap: var(--spacing-md);
     margin-bottom: var(--spacing-xs);
+    align-items: stretch;
 }
 
 .machine-stat-item {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: var(--spacing-sm);
     padding: var(--spacing-sm);
     background: var(--bg-tertiary);
     border-radius: var(--radius-md);
+    min-height: 64px;
 }
 
 .machine-stat-icon {
@@ -115,9 +123,51 @@
     flex-shrink: 0;
 }
 
-.machine-stat-icon.completed {
-    background: rgba(16, 185, 129, 0.15);
-    color: var(--accent-success);
+.machine-stat-label.machine-stat-label--multiline {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+}
+
+.machine-stat-sublabel {
+    font-weight: 400;
+    color: var(--text-tertiary);
+}
+
+.machine-stat-icon.digital-cut-gauge {
+    background: rgba(14, 165, 233, 0.18);
+    color: #38bdf8;
+}
+
+.machine-stat-icon.slitter-gauge {
+    background: rgba(16, 185, 129, 0.2);
+    color: #34d399;
+}
+
+.machine-stat-value.machine-stat-value--stacked {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    line-height: 1.15;
+    min-height: 2.1rem;
+    justify-content: center;
+}
+
+.machine-stat-value-secondary {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.machine-stat-label.machine-stat-label--press-state {
+    text-transform: none;
+    letter-spacing: normal;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    max-width: 100%;
+    line-height: 1.2;
 }
 
 .machine-stat-icon.in-progress {
@@ -125,8 +175,19 @@
     color: var(--accent-warning);
 }
 
-.machine-stat-icon.status {
-    /* Dynamic colors applied via inline styles */
+.machine-stat-icon.status.active {
+    background: rgba(16, 185, 129, 0.15);
+    color: var(--accent-success);
+}
+
+.machine-stat-icon.status.idle {
+    background: rgba(148, 163, 184, 0.15);
+    color: var(--text-tertiary);
+}
+
+.machine-stat-icon.status.disconnected {
+    background: rgba(239, 68, 68, 0.15);
+    color: var(--accent-danger, #ef4444);
 }
 
 .machine-stat-content {
@@ -134,12 +195,12 @@
     min-width: 0;
 }
 
-.machine-stat-value {
-    font-size: 1.25rem;
-    font-weight: 700;
-    color: var(--text-primary);
-    line-height: 1;
-    margin-bottom: 2px;
+.machine-stat-value.machine-stat-value--status {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    max-width: 100%;
+    line-height: 1.2;
 }
 
 .machine-stat-label {
@@ -174,7 +235,7 @@
     padding: var(--spacing-xs) var(--spacing-sm);
     background: var(--bg-tertiary);
     border-radius: var(--radius-sm);
-    transition: all var(--transition-base);
+    transition: background-color var(--transition-base);
 }
 
 .recent-activity-item:hover {
@@ -223,6 +284,7 @@
     font-style: italic;
     padding: var(--spacing-sm);
     text-align: center;
+    margin-top: auto;
 }
 
 .loading-state,

@@ -1,0 +1,212 @@
+SchedulerMachine [color: blue] {
+  id string pk
+  name string
+  displayName string
+  enabled boolean
+  sortOrder int
+}
+
+SchedulerOperation [color: blue] {
+  id string pk
+  machineId string
+  plannerOperationId string
+  name string
+  type string
+  sortOrder int
+}
+
+SchedulerOperationParam [color: blue] {
+  id string pk
+  operationId string
+  key string
+  value json
+}
+
+SchedulerBatchRule [color: blue] {
+  id string pk
+  operationId string
+  scope string
+}
+
+SchedulerMaterialOverride [color: blue] {
+  id string pk
+  operationId string
+  materialKey string
+}
+
+SchedulerOperationDependency [color: blue] {
+  id string pk
+  operationId string
+  requiresParam string
+}
+
+SchedulerConnector [color: blue] {
+  id string pk
+  name string
+  type string
+}
+
+SchedulerJob [color: blue] {
+  id string pk
+  connectorId string
+  material string
+  productionPath string
+}
+
+SchedulerJobMachineSchedule [color: blue] {
+  id string pk
+  jobId string
+  machineId string
+  scheduledDate timestamp
+}
+
+SchedulerScannerDevices [color: blue] {
+  deviceId string pk
+  machineId string
+  modeId string
+  operationId string
+}
+
+MachineModes [color: blue] {
+  modeId int pk
+  machineId string
+  label string
+}
+
+ProcessingMarkers [color: blue] {
+  markerId int pk
+  markerType string
+  lastProcessedId int
+}
+
+ScannedCodes [color: green] {
+  scanId int pk
+  codeText string
+  scannedAt timestamp
+  machineId string
+  operations json
+}
+
+JobOperations [color: green] {
+  jobId string
+  versionTag string
+  operationId string
+  completedAt timestamp
+  completedBy string
+  sourceId int
+}
+
+ImpositionOperations [color: green] {
+  impositionId string
+  operationId string
+  completedAt timestamp
+  sourceId int
+}
+
+JobOperationDuration [color: green] {
+  id int pk
+  jobId string
+  versionTag string
+  operationId string
+  machineId string
+}
+
+JobLaneOverrides [color: green] {
+  jobId string pk
+  operationId string
+  expiresAt timestamp
+}
+
+ProductionPlannerPaths [color: green] {
+  runlistId string
+  impositionId string
+}
+
+ImpositionFileMapping [color: green] {
+  impositionId string
+  fileId string
+  sequenceOrder int
+}
+
+ImpositionConfigurations [color: green] {
+  impositionId string
+  sheetWidth number
+  pdfQuantity int
+}
+
+Materials [color: orange] {
+  materialId string pk
+  materialCode string
+  materialName string
+  substrateGroup string
+  stock number
+}
+
+MaterialGroups [color: orange] {
+  groupId string pk
+  name string
+}
+
+MaterialGroupMemberships [color: orange] {
+  materialId string
+  groupId string
+}
+
+MaterialStockMovements [color: orange] {
+  movementId int pk
+  materialId string
+}
+
+MaterialSupplierPricing [color: orange] {
+  materialId string
+}
+
+MaterialConversions [color: orange] {
+  materialId string
+}
+
+MaterialPrintProfiles [color: orange] {
+  materialId string
+}
+
+PrintOS [color: orange] {
+  id int pk
+  jobCompleteTime timestamp
+}
+
+Jobs [color: orange] {
+  jobId string pk
+  jobNumber string
+}
+
+SchedulerOperation.machineId > SchedulerMachine.id
+SchedulerOperationParam.operationId > SchedulerOperation.id
+SchedulerBatchRule.operationId - SchedulerOperation.id
+SchedulerMaterialOverride.operationId > SchedulerOperation.id
+SchedulerOperationDependency.operationId > SchedulerOperation.id
+SchedulerJob.connectorId > SchedulerConnector.id
+SchedulerJobMachineSchedule.jobId > SchedulerJob.id
+SchedulerJobMachineSchedule.machineId > SchedulerMachine.id
+SchedulerScannerDevices.machineId > SchedulerMachine.id
+MachineModes.machineId > SchedulerMachine.id
+
+SchedulerScannerDevices.modeId > MachineModes.modeId
+SchedulerScannerDevices.operationId > SchedulerOperation.plannerOperationId
+
+JobOperations > JobOperationDuration
+JobOperations.jobId > JobLaneOverrides.jobId
+ScannedCodes.scanId > JobOperations.sourceId
+ImpositionFileMapping.impositionId <> ProductionPlannerPaths.impositionId
+ImpositionConfigurations.impositionId > ProductionPlannerPaths.impositionId
+
+MaterialStockMovements.materialId > Materials.materialId
+MaterialGroupMemberships.materialId > Materials.materialId
+MaterialGroupMemberships.groupId > MaterialGroups.groupId
+MaterialSupplierPricing.materialId > Materials.materialId
+MaterialConversions.materialId > Materials.materialId
+MaterialPrintProfiles.materialId > Materials.materialId
+Materials.substrateGroup > MaterialGroups.groupId
+
+ScannedCodes.machineId > SchedulerMachine.id
+JobOperationDuration.machineId > SchedulerMachine.id
+JobOperations.sourceId > PrintOS.id

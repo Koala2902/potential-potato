@@ -24,8 +24,32 @@
 .job-page__controls {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--spacing-sm);
   margin-bottom: var(--spacing-md);
+}
+
+.job-page__search {
+  flex: 1;
+  min-width: 12rem;
+  max-width: 28rem;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  padding: 6px 10px;
+  font-size: 0.85rem;
+}
+
+.job-page__search::placeholder {
+  color: var(--text-tertiary);
+}
+
+.job-page__controls-trailing {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  margin-left: auto;
 }
 
 .job-page__controls label {
@@ -91,6 +115,11 @@
 
 .job-page__group {
   list-style: none;
+  cursor: grab;
+}
+
+.job-page__group--dragging {
+  opacity: 0.5;
 }
 
 .job-page__group-header {
@@ -98,15 +127,24 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  border: 0;
-  background: transparent;
+  gap: 4px;
   font-size: 0.9rem;
   font-weight: 600;
   color: var(--text-tertiary);
   margin: 0 0 6px;
   padding: 0 2px;
-  cursor: pointer;
   text-align: left;
+}
+
+.job-page__group-collapse {
+  flex-shrink: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-tertiary);
+  padding: 0 2px 0 0;
+  font-size: 0.9rem;
+  line-height: 1;
+  cursor: pointer;
 }
 
 .job-page__group-title {

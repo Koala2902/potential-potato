@@ -9,10 +9,30 @@ export const SETUP_TIME_PARAM_KEY = "SETUP_TIME_MIN";
 /** `TimeEstimatorSettings.key` for routing rules JSON. */
 export const SCHEDULER_ROUTING_KEY = "scheduler_routing_v1";
 
+/**
+ * UUID v4 for client-generated IDs. Uses `crypto.randomUUID` when available;
+ * falls back when not (e.g. non-secure `http://` except localhost).
+ */
+export function randomUuidV4(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    try {
+      return crypto.randomUUID();
+    } catch {
+      /* not a secure context */
+    }
+  }
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+/** Mode and operation refs may be UUIDs or legacy planner ids (e.g. op001). */
 export const schedulerModeSchema = z.object({
-  id: z.string().uuid(),
+  id: z.string().min(1),
   name: z.string().min(1),
-  operationIds: z.array(z.string().uuid()),
+  operationIds: z.array(z.string().min(1)),
 });
 
 export type SchedulerMode = z.infer<typeof schedulerModeSchema>;

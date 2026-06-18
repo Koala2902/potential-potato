@@ -1,28 +1,35 @@
-import { Settings, Factory, CalendarDays, Cog, KanbanSquare } from 'lucide-react';
+import { Settings, Factory, CalendarDays, Cog, KanbanSquare, BarChart3, Package } from 'lucide-react';
+import { TOUCH_NAV_PAGES, type TouchNavPage } from '../../lib/touch-nav';
 import './Navigation.css';
 
-type Page = 'operation' | 'production' | 'schedule' | 'job' | 'config';
+export type AppPage = TouchNavPage | 'operation' | 'analytics' | 'config';
 
 interface NavigationProps {
-    currentPage: Page;
-    onPageChange: (page: Page) => void;
+    currentPage: AppPage;
+    onPageChange: (page: AppPage) => void;
+    touchOnly?: boolean;
 }
 
-export default function Navigation({ currentPage, onPageChange }: NavigationProps) {
-    const tabs = [
-        { id: 'operation' as Page, label: 'Operation', icon: Settings },
-        { id: 'production' as Page, label: 'Production', icon: Factory },
-        { id: 'schedule' as Page, label: 'Schedule', icon: CalendarDays },
-        { id: 'job' as Page, label: 'Job', icon: KanbanSquare },
-        { id: 'config' as Page, label: 'Config', icon: Cog },
-    ];
+const TABS: { id: AppPage; label: string; icon: typeof Factory }[] = [
+    { id: 'operation', label: 'Operation', icon: Settings },
+    { id: 'production', label: 'Production', icon: Factory },
+    { id: 'schedule', label: 'Schedule', icon: CalendarDays },
+    { id: 'job', label: 'Job', icon: KanbanSquare },
+    { id: 'analytics', label: 'Analytics', icon: BarChart3 },
+    { id: 'stock', label: 'Stock', icon: Package },
+    { id: 'config', label: 'Config', icon: Cog },
+];
+
+export default function Navigation({ currentPage, onPageChange, touchOnly = false }: NavigationProps) {
+    const touchSet = new Set<string>(TOUCH_NAV_PAGES);
+    const tabs = touchOnly ? TABS.filter((t) => touchSet.has(t.id)) : TABS;
 
     return (
         <nav className="navigation">
             {tabs.map((tab) => {
                 const Icon = tab.icon;
                 const isActive = currentPage === tab.id;
-                
+
                 return (
                     <button
                         key={tab.id}
@@ -32,7 +39,11 @@ export default function Navigation({ currentPage, onPageChange }: NavigationProp
                                 ? 'nav-schedule'
                                 : tab.id === 'config'
                                   ? 'nav-config'
-                                  : undefined
+                                  : tab.id === 'analytics'
+                                    ? 'nav-analytics'
+                                    : tab.id === 'stock'
+                                      ? 'nav-stock'
+                                      : undefined
                         }
                         className={`nav-tab ${isActive ? 'active' : ''}`}
                         onClick={() => onPageChange(tab.id)}
@@ -45,4 +56,3 @@ export default function Navigation({ currentPage, onPageChange }: NavigationProp
         </nav>
     );
 }
-

@@ -1,8 +1,8 @@
 {
-  "name": "legacy-operation-view",
+  "name": "legacy-tablet-ui",
   "private": true,
   "version": "0.0.0",
   "scripts": {
-    "dev": "python3 -m http.server 5174"
+    "dev": "vite --config vite.config.ts"
   }
 }

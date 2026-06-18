@@ -1,0 +1,123 @@
+.production-page--touch {
+    padding: var(--spacing-md);
+    padding-top: max(var(--spacing-md), env(safe-area-inset-top, 0));
+    height: 100%;
+    box-sizing: border-box;
+}
+
+.production-touch-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--spacing-md);
+    height: 100%;
+    align-content: start;
+}
+
+.production-touch-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--spacing-sm);
+    min-height: 8rem;
+    padding: var(--spacing-lg);
+    border-radius: var(--radius-lg);
+    border: 2px solid var(--border-color);
+    background: var(--bg-secondary);
+    cursor: pointer;
+    text-align: center;
+}
+
+.production-touch-card--active {
+    border-color: var(--accent-success);
+    background: color-mix(in srgb, var(--accent-success) 12%, var(--bg-secondary));
+}
+
+.production-touch-card--idle {
+    border-color: var(--border-color);
+}
+
+.production-touch-card--disconnected {
+    border-color: var(--accent-danger);
+    background: color-mix(in srgb, var(--accent-danger) 10%, var(--bg-secondary));
+}
+
+.production-touch-card__name {
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.production-touch-card__status {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.production-touch-history-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: flex-end;
+    padding-bottom: calc(56px + env(safe-area-inset-bottom, 0));
+}
+
+.production-touch-history {
+    width: 100%;
+    max-height: 70vh;
+    overflow: auto;
+    background: var(--bg-secondary);
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    padding: var(--spacing-lg);
+}
+
+.production-touch-history__head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: var(--spacing-md);
+}
+
+.production-touch-history__head h3 {
+    margin: 0;
+    font-size: 1.1rem;
+}
+
+.production-touch-history__close {
+    min-height: 44px;
+    min-width: 44px;
+    border: none;
+    background: var(--bg-tertiary);
+    border-radius: var(--radius-md);
+    color: var(--text-primary);
+    cursor: pointer;
+}
+
+.production-touch-history__section h4 {
+    margin: 0 0 var(--spacing-sm);
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+}
+
+.production-touch-history__section ul {
+    list-style: none;
+    margin: 0 0 var(--spacing-md);
+    padding: 0;
+}
+
+.production-touch-history__section li {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--spacing-sm);
+    padding: var(--spacing-sm) 0;
+    border-bottom: 1px solid var(--border-color);
+    font-size: 0.85rem;
+}
+
+.production-touch-history__empty {
+    color: var(--text-secondary);
+    margin: 0;
+}

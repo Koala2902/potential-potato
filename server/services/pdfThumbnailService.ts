@@ -5,7 +5,7 @@ import path from 'path';
 import { promisify } from 'util';
 import type { Request, Response } from 'express';
 import sharp from 'sharp';
-import { resolvePdfWithStats } from '../pdf-archive.js';
+import { PDF_ARCHIVE_PATH, resolvePdfWithStats } from '../pdf-archive.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -16,6 +16,7 @@ const MAX_WIDTH = 1600;
 const MASTER_RASTER_MAX_SIDE = 1200;
 
 let pdftoppmAvailable: boolean | null = null;
+let cacheDirReady = false;
 
 export class PdfThumbnailNotFoundError extends Error {
     constructor(impositionId: string) {
@@ -31,10 +32,21 @@ export class PdfThumbnailRendererUnavailableError extends Error {
     }
 }
 
+export class PdfThumbnailCacheUnavailableError extends Error {
+    constructor(cacheDir: string, detail?: string) {
+        super(
+            detail
+                ? `PDF thumbnail cache unavailable at ${cacheDir}: ${detail}`
+                : `PDF thumbnail cache unavailable at ${cacheDir}`
+        );
+        this.name = 'PdfThumbnailCacheUnavailableError';
+    }
+}
+
 function thumbnailCacheDir(): string {
     return (
         process.env.PDF_THUMBNAIL_CACHE_DIR?.trim() ||
-        path.resolve(process.cwd(), '.cache/pdf-thumbnails')
+        path.join(PDF_ARCHIVE_PATH, '.thumb-cache')
     );
 }
 
@@ -46,6 +58,11 @@ function clampWidth(raw: unknown): number {
 
 function safeImpositionId(impositionId: string): string {
     return impositionId.replace(/[^a-zA-Z0-9._-]/g, '_');
+}
+
+function sourceKeyFromPdfPath(pdfPath: string): string {
+    const base = path.basename(pdfPath);
+    return base.replace(/\.pdf$/i, '');
 }
 
 /** Bump when raster/encode logic changes (invalidates stale cache entries). */
@@ -74,9 +91,30 @@ async function checkPdftoppm(): Promise<boolean> {
     }
 }
 
+function ensureCacheDirAvailable(): string {
+    const dir = thumbnailCacheDir();
+    try {
+        fs.mkdirSync(dir, { recursive: true });
+        cacheDirReady = true;
+        return dir;
+    } catch (error) {
+        cacheDirReady = false;
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new PdfThumbnailCacheUnavailableError(dir, detail);
+    }
+}
+
 export function initPdfThumbnailService(): void {
     const dir = thumbnailCacheDir();
-    fs.mkdirSync(dir, { recursive: true });
+    try {
+        ensureCacheDirAvailable();
+    } catch (error) {
+        if (error instanceof PdfThumbnailCacheUnavailableError) {
+            console.error(`[pdf-thumbnail] ${error.message}`);
+        } else {
+            console.error('[pdf-thumbnail] failed to prepare cache directory:', error);
+        }
+    }
     void checkPdftoppm().then((ok) => {
         pdftoppmAvailable = ok;
         if (!ok) {
@@ -84,7 +122,11 @@ export function initPdfThumbnailService(): void {
                 '[pdf-thumbnail] pdftoppm not found on PATH. Install poppler-utils (e.g. brew install poppler). Thumbnail route will return 503.'
             );
         } else {
-            console.log(`[pdf-thumbnail] cache: ${dir}`);
+            if (cacheDirReady) {
+                console.log(`[pdf-thumbnail] cache: ${dir}`);
+            } else {
+                console.warn('[pdf-thumbnail] cache directory is unavailable; thumbnail route will return 503.');
+            }
         }
     });
 }
@@ -125,13 +167,13 @@ async function getOrRenderMasterRaster(
     pdfPath: string,
     stats: fs.Stats
 ): Promise<Buffer> {
+    ensureCacheDirAvailable();
     const rasterPath = masterRasterPathFor(impositionId, stats);
     if (fs.existsSync(rasterPath)) {
         return fs.promises.readFile(rasterPath);
     }
 
     const png = await renderPage1Png(pdfPath, MASTER_RASTER_MAX_SIDE);
-    fs.mkdirSync(thumbnailCacheDir(), { recursive: true });
     await fs.promises.writeFile(rasterPath, png);
     return png;
 }
@@ -145,13 +187,21 @@ export async function getPdfThumbnail(
         throw new PdfThumbnailNotFoundError(impositionId);
     }
 
-    const { path: pdfPath, stats } = resolved;
-    const cachePath = cachePathFor(impositionId, stats, width);
+    return getPdfThumbnailFromResolvedSource(impositionId, resolved.path, resolved.stats, width);
+}
+
+async function getPdfThumbnailFromResolvedSource(
+    sourceKey: string,
+    pdfPath: string,
+    stats: fs.Stats,
+    width: number
+): Promise<Buffer> {
+    const cachePath = cachePathFor(sourceKey, stats, width);
     if (fs.existsSync(cachePath)) {
         return fs.promises.readFile(cachePath);
     }
 
-    const png = await getOrRenderMasterRaster(impositionId, pdfPath, stats);
+    const png = await getOrRenderMasterRaster(sourceKey, pdfPath, stats);
     const meta = await sharp(png).metadata();
     const longest = Math.max(meta.width ?? 0, meta.height ?? 0);
     const pipeline =
@@ -161,9 +211,22 @@ export async function getPdfThumbnail(
 
     const webp = await pipeline.webp({ quality: 85, effort: 4 }).toBuffer();
 
-    fs.mkdirSync(thumbnailCacheDir(), { recursive: true });
+    ensureCacheDirAvailable();
     await fs.promises.writeFile(cachePath, webp);
     return webp;
+}
+
+/**
+ * Pregenerate thumbnail cache entry from an explicit PDF file path.
+ * Uses the filename stem as source key so app requests still hit cache when ids match filenames.
+ */
+export async function getPdfThumbnailForPdfPath(
+    pdfPath: string,
+    width: number
+): Promise<Buffer> {
+    const stats = await fs.promises.stat(pdfPath);
+    const sourceKey = sourceKeyFromPdfPath(pdfPath);
+    return getPdfThumbnailFromResolvedSource(sourceKey, pdfPath, stats, width);
 }
 
 export async function servePdfThumbnail(
@@ -198,6 +261,10 @@ export async function servePdfThumbnail(
         }
         if (error instanceof PdfThumbnailRendererUnavailableError) {
             res.status(503).json({ error: 'PDF thumbnail renderer unavailable' });
+            return;
+        }
+        if (error instanceof PdfThumbnailCacheUnavailableError) {
+            res.status(503).json({ error: 'PDF thumbnail cache unavailable' });
             return;
         }
         throw error;

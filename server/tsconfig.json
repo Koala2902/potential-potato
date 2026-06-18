@@ -11,9 +11,9 @@
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "outDir": "./dist",
-    "rootDir": "./"
+    "rootDir": ".."
   },
-  "include": ["**/*.ts"],
+  "include": ["**/*.ts", "../src/lib/job-operation-lane-sql.ts"],
   "exclude": ["node_modules", "dist"]
 }
 

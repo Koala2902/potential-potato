@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
+import { fileURLToPath } from 'url';
 import {
     getProductionQueue,
     getImpositionDetails,
@@ -22,12 +23,16 @@ import {
     recordScannedCode,
     recordRunlistScans,
     getJobs,
+    upsertJobLaneOverride,
 } from './db/jobmanager-queries.js';
 import {
     processPrintOSRecords,
     processScannedCodes,
     enrichProductionStatusWithSourceTables,
+    mergeProductionJobDurationSeconds,
     mergeProductionStatusGroupsByCanonicalMachineId,
+    attachDigitalCutRunlistGaugeToProductionStatus,
+    attachSlitterRunlistGaugeToProductionStatus,
     backfillLegacyIndigoMachineIdsOnLogs,
 } from './db/status-updates.js';
 import { getPrintOsDatabaseUrl } from './db/database-config.js';
@@ -37,12 +42,70 @@ import { plannerUrlsDiffer } from './db/planner-client.js';
 import { PRODUCTION_COMPLETED_JOBS_PER_MACHINE } from './db/production-status-limits.js';
 import { canonicalCompositeJobIdForDisplay } from './db/scan-job-version.js';
 import { isUndefinedTableError } from './db/pg-errors.js';
+import { pgTimestampToIsoUtc } from './db/pg-timestamp.js';
 import { schedulerRouter } from './scheduler-api.js';
-import { warnIfPdfMissing } from './pdf-archive.js';
-import { warmPdfThumbnail } from './services/pdfThumbnailService.js';
+import { isAutomaticScanProcessingEnabled } from './processing-env.js';
+import { analyticsRouter } from './analytics-api.js';
+import { stockRouter, resolveMaterialBarcodeScan } from './stock-api.js';
+import { getPrintOsPool } from './db/print-os-pool.js';
+import { prisma } from './db/prisma.js';
+import {
+    getScannerDevice,
+    upsertScannerDeviceHeartbeat,
+} from './db/scanner-devices.js';
+import {
+    warnIfPdfMissing,
+} from './pdf-archive.js';
+import {
+    warmPdfThumbnail,
+} from './services/pdfThumbnailService.js';
 import { initPdfServices, pdfApiRouter } from './pdf-api.js';
 
 dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const PI_INSTALLER_PATH = path.resolve(__dirname, '../scripts/pi-install.sh');
+const PI_CLIENT_PATH = path.resolve(__dirname, '../scripts/pi-scanner-client.py');
+
+/** Seconds + human label since {@link ProductionJob.last_completed_at} (API server clock; after enrich). */
+function attachSecondsAgoToProductionJobs(
+    grouped: Record<string, { completed: any[]; processing: any[] }>
+): void {
+    const now = Date.now();
+    for (const g of Object.values(grouped)) {
+        for (const j of [...g.completed, ...g.processing]) {
+            const iso = j?.last_completed_at;
+            if (typeof iso !== 'string' || !iso.trim()) {
+                j.seconds_ago = null;
+                j.time_ago = null;
+                continue;
+            }
+            const t = Date.parse(iso);
+            if (!Number.isFinite(t)) {
+                j.seconds_ago = null;
+                j.time_ago = null;
+                continue;
+            }
+            const sec = Math.floor((now - t) / 1000);
+            j.seconds_ago = sec;
+            j.time_ago = humanizeSecondsAgoLabel(sec);
+        }
+    }
+}
+
+function humanizeSecondsAgoLabel(sec: number): string {
+    if (!Number.isFinite(sec)) return '—';
+    if (sec < 0) return '—';
+    if (sec < 10) return 'Just now';
+    if (sec < 60) return `${sec}s ago`;
+    const m = Math.floor(sec / 60);
+    if (m < 60) return `${m}m ago`;
+    const h = Math.floor(sec / 3600);
+    if (h < 24) return `${h}h ago`;
+    const d = Math.floor(sec / 86400);
+    return `${d}d ago`;
+}
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -58,10 +121,354 @@ console.log(
 );
 initPdfServices();
 
+type ScanApiResult = {
+    status: number;
+    body: Record<string, unknown>;
+};
+
+type ProcessScanRequestInput = {
+    scan: string;
+    machineId?: string | null;
+    operations?: string[] | null;
+    userId?: string | null;
+    metadata?: Record<string, unknown> | null;
+};
+
+function timestampedMetadata(metadata?: Record<string, unknown> | null): Record<string, unknown> {
+    return {
+        ...(metadata ?? {}),
+        timestamp: new Date().toISOString(),
+    };
+}
+
+function readSchedulerModes(constants: unknown): Array<{ id: string; operationIds: string[] }> {
+    if (!constants || typeof constants !== 'object' || Array.isArray(constants)) {
+        return [];
+    }
+    const raw = (constants as Record<string, unknown>).schedulerModes;
+    if (!Array.isArray(raw)) {
+        return [];
+    }
+    return raw.flatMap((item) => {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) {
+            return [];
+        }
+        const modeRow = item as { id?: unknown; operationIds?: unknown };
+        const id = typeof modeRow.id === 'string'
+            ? modeRow.id.trim()
+            : '';
+        const operationIds = Array.isArray(modeRow.operationIds)
+            ? modeRow.operationIds
+                .filter((value: unknown): value is string => typeof value === 'string' && value.trim().length > 0)
+            : [];
+        if (!id) {
+            return [];
+        }
+        return [{ id, operationIds }];
+    });
+}
+
+async function processScanRequest(input: ProcessScanRequestInput): Promise<ScanApiResult> {
+    const { scan, machineId, operations, userId, metadata } = input;
+
+    console.log(
+        `[processScanRequest] scan="${scan}" machineId=${machineId ?? '—'} ops=${operations ? 'yes' : 'no'}`
+    );
+
+    try {
+        const printPool = getPrintOsPool();
+        const matHit = await resolveMaterialBarcodeScan(printPool, scan);
+        if (matHit.kind === 'ambiguous') {
+            return {
+                status: 409,
+                body: {
+                    error: 'Ambiguous material barcode',
+                    materialIds: matHit.materialIds,
+                },
+            };
+        }
+        if (matHit.kind === 'single') {
+            return {
+                status: 200,
+                body: {
+                    scanKind: 'material_stock',
+                    materialId: matHit.materialId,
+                    material: matHit.material,
+                },
+            };
+        }
+    } catch (matErr: unknown) {
+        const msg = matErr instanceof Error ? matErr.message : String(matErr);
+        console.warn(
+            `[processScanRequest] material barcode lookup skipped (continuing as runlist scan): ${msg}`
+        );
+    }
+
+    const runlistId = await findRunlistByScan(scan);
+
+    let individualFileIds: any[] = [];
+    if (runlistId) {
+        try {
+            const fileIdsResult = await getDistinctFileIdsForRunlist(runlistId);
+            for (const row of fileIdsResult) {
+                const fileId = row.file_id;
+                const match = fileId.match(/^FILE_(\d+)_Labex_(.+)$/);
+                if (!match) continue;
+                const versionTag = match[1];
+                const afterLabex = match[2];
+                const parts = afterLabex.split('_');
+                if (parts.length < 2) continue;
+                const numericParts: string[] = [];
+                for (const part of parts) {
+                    if (/^\d+$/.test(part)) {
+                        numericParts.push(part);
+                    } else {
+                        break;
+                    }
+                }
+                if (numericParts.length >= 2) {
+                    const jobId = numericParts.join('_');
+                    individualFileIds.push({
+                        file_id: fileId,
+                        code_text: `${jobId}_${versionTag}`,
+                        job_id: jobId,
+                        version_tag: versionTag,
+                    });
+                }
+            }
+        } catch (err) {
+            console.error('Error getting individual file IDs:', err);
+        }
+    }
+
+    const isRunlistDirectScan = Boolean(runlistId && scan === runlistId);
+
+    let scannedImpositionId: string | null = null;
+    if (runlistId && !isRunlistDirectScan) {
+        try {
+            scannedImpositionId = await findImpositionIdForScanInRunlist(scan, runlistId);
+            if (scannedImpositionId) {
+                warnIfPdfMissing(scannedImpositionId);
+                warmPdfThumbnail(scannedImpositionId);
+            }
+        } catch (err) {
+            console.error(`[processScanRequest] Error finding imposition_id:`, err);
+        }
+    }
+
+    let recordedScans: any[] = [];
+    if (machineId && typeof machineId === 'string' && machineId.trim()) {
+        const hasOpList =
+            operations && Array.isArray(operations) && operations.length > 0;
+        const opsPayload: Record<string, unknown> | null = hasOpList
+            ? { operations }
+            : null;
+        const mergedMetadata = timestampedMetadata(metadata);
+        try {
+            if (isRunlistDirectScan && runlistId) {
+                const scans = await recordRunlistScans(
+                    runlistId,
+                    machineId,
+                    userId || null,
+                    opsPayload,
+                    mergedMetadata
+                );
+                recordedScans = scans.map((s) => ({
+                    scan_id: s.scan_id,
+                    code_text: s.code_text,
+                    scanned_at: s.scanned_at,
+                }));
+            } else {
+                const scannedCode = await recordScannedCode(
+                    scan,
+                    machineId,
+                    userId || null,
+                    opsPayload,
+                    mergedMetadata,
+                    scannedImpositionId
+                );
+                recordedScans = [
+                    {
+                        scan_id: scannedCode.scan_id,
+                        code_text: scannedCode.code_text,
+                        scanned_at: scannedCode.scanned_at,
+                    },
+                ];
+            }
+
+            if (hasOpList) {
+                processScannedCodes().catch((err) => {
+                    console.error('Error processing scanned codes after new scan:', err);
+                });
+            }
+        } catch (recordError) {
+            console.error('Error recording scan (continuing anyway):', recordError);
+        }
+    }
+
+    if (!runlistId) {
+        const matchIds = await findRunlistIdsMatchingScanFragment(scan);
+
+        if (matchIds.length > 1) {
+            return {
+                status: 400,
+                body: {
+                    error: `Multiple runlists found matching "${scan}". Please scan the full runlist ID.`,
+                    matches: matchIds,
+                },
+            };
+        }
+        if (matchIds.length === 1) {
+            const queue = await getProductionQueueByRunlist(matchIds[0]);
+            return {
+                status: 200,
+                body: {
+                    runlistId: matchIds[0],
+                    queue,
+                    recordedScans: recordedScans.length > 0 ? recordedScans : undefined,
+                    individualFileIds: individualFileIds.length > 0 ? individualFileIds : undefined,
+                },
+            };
+        }
+
+        return {
+            status: 404,
+            body: { error: `No runlist found for scan: "${scan}"` },
+        };
+    }
+
+    const queue = await getProductionQueueByRunlist(runlistId);
+    return {
+        status: 200,
+        body: {
+            runlistId,
+            queue,
+            scannedImpositionId,
+            recordedScans: recordedScans.length > 0 ? recordedScans : undefined,
+            individualFileIds: individualFileIds.length > 0 ? individualFileIds : undefined,
+        },
+    };
+}
+
+async function resolveScannerDeviceAssignment(deviceId: string): Promise<{
+    machineId: string | null;
+    payloadOperations: string[] | null;
+    reason: string | null;
+}> {
+    const device = await getScannerDevice(deviceId);
+    if (!device) {
+        return {
+            machineId: null,
+            payloadOperations: null,
+            reason: 'Scanner device not found',
+        };
+    }
+    if (!device.enabled) {
+        return {
+            machineId: null,
+            payloadOperations: null,
+            reason: 'Scanner device is disabled',
+        };
+    }
+    if (!device.machineId) {
+        return {
+            machineId: null,
+            payloadOperations: null,
+            reason: 'Scanner device is not assigned to a machine yet',
+        };
+    }
+
+    const machine = await prisma.machine.findUnique({
+        where: { id: device.machineId },
+        include: {
+            operations: {
+                where: { enabled: true },
+                orderBy: { sortOrder: 'asc' },
+            },
+        },
+    });
+
+    if (!machine || !machine.enabled) {
+        return {
+            machineId: null,
+            payloadOperations: null,
+            reason: 'Assigned machine is missing or disabled',
+        };
+    }
+
+    if (device.modeId) {
+        const mode = readSchedulerModes(machine.constants).find((row) => row.id === device.modeId);
+        if (!mode) {
+            return {
+                machineId: machine.id,
+                payloadOperations: null,
+                reason: 'Assigned mode was not found on the machine',
+            };
+        }
+
+        const operation = mode.operationIds
+            .map((opId) =>
+                machine.operations.find(
+                    (row) => row.id === opId || row.plannerOperationId === opId
+                )
+            )
+            .find(Boolean);
+
+        if (!operation) {
+            return {
+                machineId: machine.id,
+                payloadOperations: null,
+                reason: 'Assigned mode has no enabled operations to scan against',
+            };
+        }
+
+        return {
+            machineId: machine.id,
+            payloadOperations: [operation.plannerOperationId?.trim() || operation.id],
+            reason: null,
+        };
+    }
+
+    if (device.operationId) {
+        const operation = machine.operations.find((row) => row.id === device.operationId);
+        if (!operation) {
+            return {
+                machineId: machine.id,
+                payloadOperations: null,
+                reason: 'Assigned operation was not found on the machine',
+            };
+        }
+
+        return {
+            machineId: machine.id,
+            payloadOperations: [operation.plannerOperationId?.trim() || operation.id],
+            reason: null,
+        };
+    }
+
+    return {
+        machineId: machine.id,
+        payloadOperations: null,
+        reason: 'Scanner device has no mode or operation assigned yet',
+    };
+}
+
+function readRequestIp(req: express.Request): string | null {
+    const forwarded = req.headers['x-forwarded-for'];
+    const raw = Array.isArray(forwarded)
+        ? forwarded[0]
+        : typeof forwarded === 'string' && forwarded.includes(',')
+            ? forwarded.split(',')[0]
+            : forwarded;
+    const candidate = raw || req.socket.remoteAddress || req.ip || null;
+    return typeof candidate === 'string' && candidate.trim() ? candidate.trim() : null;
+}
+
 app.use(cors());
 app.use(express.json());
 app.use('/api/scheduler', schedulerRouter);
-app.use('/api/pdf', pdfApiRouter);
+app.use('/api/analytics', analyticsRouter);
+app.use('/api/stock', stockRouter);
 
 // Root route - server status
 app.get('/', (req, res) => {
@@ -77,20 +484,63 @@ app.get('/', (req, res) => {
             operations: '/api/operations?machineId=:machineId',
             machineModes: '/api/machine-modes?machineId=:machineId',
             schedulerModes: '/api/scheduler-modes?machineId=:machineId',
-            scan: '/api/scan (POST)',
+            scan: '/api/scan (POST) — may return scanKind material_stock for material barcodes',
             scannedCodes: '/api/scanned-codes (POST)',
             jobs: '/api/jobs?status=print_ready&limit=100',
             schedulerJobs: '/api/scheduler/jobs',
             schedulerEstimate: '/api/scheduler/estimate (POST)',
             schedulerConfigMachines: '/api/scheduler/config/machines (GET, POST, PATCH)',
+            schedulerConfigScannerDevices: '/api/scheduler/config/scanner-devices (GET, PATCH)',
             schedulerConfigOperations: '/api/scheduler/config/machines/:id/operations (POST, PATCH, DELETE)',
             schedulerDiagnostics: '/api/scheduler/config/diagnostics',
             schedulerRoutingSettings: '/api/scheduler/settings/routing (GET, PUT)',
-            schedulerTimeEstimatorSettings: '/api/scheduler/settings/time-estimator (GET)'
+            schedulerTimeEstimatorSettings: '/api/scheduler/settings/time-estimator (GET)',
+            deviceScan: '/api/device-scan (POST)',
+            piInstall: '/pi/install.sh',
+            piClient: '/pi/scanner-client.py',
+            analyticsKpis: '/api/analytics/kpis?from=&to=',
+            analyticsThroughput: '/api/analytics/throughput?from=&to=',
+            analyticsMachinePerformance: '/api/analytics/machine-performance?from=&to=',
+            analyticsOperationDurations: '/api/analytics/operation-durations?operationId=op001&from=&to=',
+            analyticsLaneFunnel: '/api/analytics/lane-funnel',
+            analyticsOnTime: '/api/analytics/on-time?from=&to=',
+            stockMeta: '/api/stock/meta',
+            stockMaterialByBarcode: '/api/stock/material-by-barcode?code=',
+            stockMaterialById: '/api/stock/materials/:materialId (GET, PATCH, DELETE)',
+            stockMaterialCreate: 'POST /api/stock/materials JSON body — material_code required',
+            stockMaterialAdjust: 'POST /api/stock/materials/:materialId/adjust { delta }',
+            stockReorderCandidates: '/api/stock/reorder-candidates?company=&activeOnly=&targetFactor=',
+            stockMaterialGroups: '/api/stock/material-groups (GET, POST)',
+            stockSupplierPricing: '/api/stock/supplier-pricing?materialId=',
+            stockConversions: '/api/stock/conversions',
+            stockPrintProfiles: '/api/stock/print-profiles'
         },
         port: PORT,
         database: 'see LOGS_DATABASE_URL + DATABASE_URL'
     });
+});
+
+app.get('/pi/install.sh', (_req, res) => {
+    try {
+        const host = _req.get('host')?.trim() || `localhost:${PORT}`;
+        const defaultServerUrl = `http://${host}`;
+        const script = fs
+            .readFileSync(PI_INSTALLER_PATH, 'utf8')
+            .replace(/__DEFAULT_SERVER_URL__/g, defaultServerUrl);
+        res.type('text/x-shellscript').send(script);
+    } catch (error) {
+        console.error('Error serving Pi installer:', error);
+        res.status(500).send('Failed to load installer');
+    }
+});
+
+app.get('/pi/scanner-client.py', (_req, res) => {
+    try {
+        res.type('text/x-python').send(fs.readFileSync(PI_CLIENT_PATH, 'utf8'));
+    } catch (error) {
+        console.error('Error serving Pi scanner client:', error);
+        res.status(500).send('Failed to load scanner client');
+    }
 });
 
 // Get production queue grouped by runlist_id
@@ -128,6 +578,7 @@ app.get('/api/imposition/:impositionId/file-ids', async (req, res) => {
     }
 });
 
+app.use('/api/pdf', pdfApiRouter);
 
 // Get machines from app database
 app.get('/api/machines', async (req, res) => {
@@ -217,6 +668,7 @@ app.post('/api/scanned-codes', async (req, res) => {
 // Logs DB: job_operation_duration; imposition_file_mapping for version counts (logs pool only; merged in JS).
 app.get('/api/production-status', async (req, res) => {
     try {
+        const liteMode = String(req.query.lite ?? '').trim().toLowerCase() === '1' || String(req.query.lite ?? '').trim().toLowerCase() === 'true';
         const logsClient = await logsPool.connect();
         try {
             let result;
@@ -275,7 +727,7 @@ app.get('/api/production-status', async (req, res) => {
                         last_completed_at,
                         operation_id,
                         duration_seconds,
-                        ROW_NUMBER() OVER (PARTITION BY machine_id ORDER BY last_completed_at DESC) as rn
+                        ROW_NUMBER() OVER (PARTITION BY machine_id ORDER BY last_completed_at DESC NULLS LAST) as rn
                     FROM total_version_counts
                     WHERE all_completed = true
                 ),
@@ -288,7 +740,7 @@ app.get('/api/production-status', async (req, res) => {
                         last_started_at as last_completed_at,
                         operation_id,
                         duration_seconds,
-                        ROW_NUMBER() OVER (PARTITION BY machine_id ORDER BY last_started_at DESC) as rn
+                        ROW_NUMBER() OVER (PARTITION BY machine_id ORDER BY last_started_at DESC NULLS LAST) as rn
                     FROM total_version_counts
                     WHERE all_completed = false
                 )
@@ -343,7 +795,18 @@ app.get('/api/production-status', async (req, res) => {
                     const tPrev = new Date(prev.last_completed_at).getTime();
                     const tNew = new Date(row.last_completed_at).getTime();
                     const best = tNew >= tPrev ? row : prev;
-                    byKey.set(key, { ...best, job_id: jid });
+                    const other = tNew >= tPrev ? prev : row;
+                    const dBest = best.duration_seconds;
+                    const dOther = other.duration_seconds;
+                    const nBest =
+                        dBest != null && dBest !== '' ? Number(dBest) : NaN;
+                    const nOther =
+                        dOther != null && dOther !== '' ? Number(dOther) : NaN;
+                    const mergedSeconds = mergeProductionJobDurationSeconds(
+                        Number.isFinite(nBest) ? nBest : null,
+                        Number.isFinite(nOther) ? nOther : null
+                    );
+                    byKey.set(key, { ...best, job_id: jid, duration_seconds: mergedSeconds });
                 }
             }
             rows = Array.from(byKey.values());
@@ -409,15 +872,13 @@ app.get('/api/production-status', async (req, res) => {
                 
                 // Query returns timestamptz (absolute instant). op001 naive = Sydney wall time;
                 // scanner ops (op002+) naive = UTC wall time — see job_operation_duration writers.
-                const lastCompletedAt = row.last_completed_at 
-                    ? new Date(row.last_completed_at).toISOString()
-                    : null;
+                const lastCompletedAt = pgTimestampToIsoUtc(row.last_completed_at);
                 
                 const jobData = {
                     job_id: row.job_id,
                     processed_versions: parseInt(row.processed_versions) || 0,
                     total_versions: parseInt(row.total_versions) || 0,
-                    last_completed_at: lastCompletedAt,
+                    last_completed_at: lastCompletedAt ?? '',
                     operation_id: row.operation_id,
                     duration_seconds: row.duration_seconds,
                     progress,
@@ -430,8 +891,11 @@ app.get('/api/production-status', async (req, res) => {
                 }
             });
 
+            if (!liteMode) {
             await enrichProductionStatusWithSourceTables(grouped);
             await mergeProductionStatusGroupsByCanonicalMachineId(grouped);
+            await attachDigitalCutRunlistGaugeToProductionStatus(grouped);
+            await attachSlitterRunlistGaugeToProductionStatus(grouped);
 
             const allJobIds = new Set<string>();
             for (const g of Object.values(grouped)) {
@@ -481,7 +945,9 @@ app.get('/api/production-status', async (req, res) => {
                     ifmClient2.release();
                 }
             }
+            }
 
+            attachSecondsAgoToProductionJobs(grouped);
             res.json(Object.values(grouped));
         } finally {
             logsClient.release();
@@ -666,6 +1132,50 @@ app.put('/api/runlists/:runlistId/status', async (req, res) => {
     }
 });
 
+/** Map JobPage lane (op001..op004) to numeric sequence; matches `get_operation_sequence` SQL helper. */
+const LANE_SEQUENCE: Record<string, number> = {
+    op001: 1,
+    op002: 2,
+    op005: 2,
+    op003: 3,
+    op006: 3,
+    op004: 4,
+};
+
+/**
+ * Backwards drag (e.g. op003 → op001) leaves higher-sequence rows in `job_operations`,
+ * and `job_status_view` keeps reporting the higher op as latest. Clear `completed_at` on those
+ * higher rows so the view reflects the lane the user dropped onto.
+ */
+async function clearJobOperationsAboveTargetSequence(
+    jobId: string,
+    targetSequence: number
+): Promise<number> {
+    const targetOps: string[] = [];
+    for (const [op, seq] of Object.entries(LANE_SEQUENCE)) {
+        if (seq > targetSequence) targetOps.push(op);
+    }
+    if (targetOps.length === 0) return 0;
+
+    const pool = plannerUrlsDiffer() ? logsPool : appPool;
+    const client = await pool.connect();
+    try {
+        const result = await client.query(
+            `UPDATE job_operations
+             SET completed_at = NULL,
+                 completed_by = NULL,
+                 source_id = NULL
+             WHERE job_id = $1
+               AND LOWER(operation_id) = ANY($2::text[])
+               AND completed_at IS NOT NULL`,
+            [jobId, targetOps]
+        );
+        return result.rowCount ?? 0;
+    } finally {
+        client.release();
+    }
+}
+
 // Move job between operation lanes by creating scan-tagged operation completion.
 app.post('/api/jobs/:jobId/move-operation', async (req, res) => {
     try {
@@ -680,6 +1190,8 @@ app.post('/api/jobs/:jobId/move-operation', async (req, res) => {
                 error: `operationId must be one of: ${allowedOperationIds.join(', ')}`,
             });
         }
+
+        const targetSequence = LANE_SEQUENCE[normalizedOperationId] ?? 0;
 
         const requiredOperations = [normalizedOperationId];
         const versionTags = await getVersionTagsForJob(jobId);
@@ -705,6 +1217,15 @@ app.post('/api/jobs/:jobId/move-operation', async (req, res) => {
 
         const processResult = await processScannedCodes();
 
+        const clearedHigherOpRows = await clearJobOperationsAboveTargetSequence(
+            jobId,
+            targetSequence
+        );
+        await upsertJobLaneOverride(jobId, normalizedOperationId, 'job_page', {
+            ttlHours: 24,
+            actor: req.ip || null,
+        });
+
         return res.json({
             success: true,
             jobId,
@@ -712,6 +1233,7 @@ app.post('/api/jobs/:jobId/move-operation', async (req, res) => {
             scannedCodesCreated: scannedCodes.length,
             versionTags,
             processResult,
+            clearedHigherOpRows,
         });
     } catch (error) {
         console.error('Error moving job operation:', error);
@@ -889,155 +1411,101 @@ app.get('/api/jobs', async (req, res) => {
 // Also records the scan to scanned_codes when machineId is set (operations optional; omit for machine-only audit)
 app.post('/api/scan', async (req, res) => {
     try {
-        const { scan, machineId, operations, userId } = req.body;
-        
+        const { scan, machineId, operations, userId, metadata } = req.body;
+
         if (!scan || typeof scan !== 'string') {
             return res.status(400).json({ error: 'Scan input is required' });
         }
-
-        console.log(
-            `[POST /api/scan] scan="${scan}" machineId=${machineId ?? '—'} ops=${operations ? 'yes' : 'no'}`
-        );
-        const runlistId = await findRunlistByScan(scan);
-        
-        // Get individual file IDs for this runlist (for display purposes)
-        let individualFileIds: any[] = [];
-        if (runlistId) {
-            try {
-                const fileIdsResult = await getDistinctFileIdsForRunlist(runlistId);
-                for (const row of fileIdsResult) {
-                    const fileId = row.file_id;
-                    const match = fileId.match(/^FILE_(\d+)_Labex_(.+)$/);
-                    if (match) {
-                        const versionTag = match[1];
-                        const afterLabex = match[2];
-                        const parts = afterLabex.split('_');
-                        if (parts.length >= 2) {
-                            const numericParts: string[] = [];
-                            for (const part of parts) {
-                                if (/^\d+$/.test(part)) {
-                                    numericParts.push(part);
-                                } else {
-                                    break;
-                                }
-                            }
-                            if (numericParts.length >= 2) {
-                                const jobId = numericParts.join('_');
-                                individualFileIds.push({
-                                    file_id: fileId,
-                                    code_text: `${jobId}_${versionTag}`,
-                                    job_id: jobId,
-                                    version_tag: versionTag
-                                });
-                            }
-                        }
-                    }
-                }
-            } catch (err) {
-                console.error('Error getting individual file IDs:', err);
-            }
-        }
-        
-        // Determine if this is a runlist scan or a file_id scan
-        const isRunlistDirectScan = runlistId && scan === runlistId;
-
-        /** Resolve imposition for this scan + runlist (embedded in code_text when recording; UI preview). */
-        let scannedImpositionId: string | null = null;
-        if (runlistId && !isRunlistDirectScan) {
-            try {
-                scannedImpositionId = await findImpositionIdForScanInRunlist(scan, runlistId);
-                if (scannedImpositionId) {
-                    warnIfPdfMissing(scannedImpositionId);
-                    warmPdfThumbnail(scannedImpositionId);
-                }
-            } catch (err) {
-                console.error(`[POST /api/scan] Error finding imposition_id:`, err);
-            }
-        }
-
-        // Record scan to scanned_codes when machineId is set (operations optional)
-        let recordedScans: any[] = [];
-        if (machineId && typeof machineId === 'string' && machineId.trim()) {
-            const hasOpList =
-                operations && Array.isArray(operations) && operations.length > 0;
-            const opsPayload: Record<string, unknown> | null = hasOpList
-                ? { operations }
-                : null;
-            try {
-                if (isRunlistDirectScan) {
-                    const scans = await recordRunlistScans(
-                        runlistId,
-                        machineId,
-                        userId || null,
-                        opsPayload,
-                        { timestamp: new Date().toISOString() }
-                    );
-                    recordedScans = scans.map((s) => ({
-                        scan_id: s.scan_id,
-                        code_text: s.code_text,
-                        scanned_at: s.scanned_at,
-                    }));
-                } else {
-                    const scannedCode = await recordScannedCode(
-                        scan,
-                        machineId,
-                        userId || null,
-                        opsPayload,
-                        { timestamp: new Date().toISOString() },
-                        scannedImpositionId
-                    );
-                    recordedScans = [
-                        {
-                            scan_id: scannedCode.scan_id,
-                            code_text: scannedCode.code_text,
-                            scanned_at: scannedCode.scanned_at,
-                        },
-                    ];
-                }
-
-                // Process the scan immediately when operations were sent (job pipeline); otherwise audit-only
-                if (hasOpList) {
-                    processScannedCodes().catch(err => {
-                        console.error('Error processing scanned codes after new scan:', err);
-                    });
-                }
-            } catch (recordError) {
-                console.error('Error recording scan (continuing anyway):', recordError);
-                // Continue even if recording fails
-            }
-        }
-        if (!runlistId) {
-            const matchIds = await findRunlistIdsMatchingScanFragment(scan);
-
-            if (matchIds.length > 1) {
-                return res.status(400).json({
-                    error: `Multiple runlists found matching "${scan}". Please scan the full runlist ID.`,
-                    matches: matchIds
-                });
-            } else if (matchIds.length === 1) {
-                const queue = await getProductionQueueByRunlist(matchIds[0]);
-                return res.json({
-                    runlistId: matchIds[0],
-                    queue,
-                    recordedScans: recordedScans.length > 0 ? recordedScans : undefined
-                });
-            }
-
-            return res.status(404).json({ error: `No runlist found for scan: "${scan}"` });
-        }
-
-        // Get production queue for this runlist (show all impositions)
-        const queue = await getProductionQueueByRunlist(runlistId);
-
-        res.json({ 
-            runlistId, 
-            queue,
-            scannedImpositionId, // Send this so frontend can auto-select it
-            recordedScans: recordedScans.length > 0 ? recordedScans : undefined
+        const result = await processScanRequest({
+            scan,
+            machineId: typeof machineId === 'string' ? machineId : null,
+            operations: Array.isArray(operations) ? operations : null,
+            userId: typeof userId === 'string' ? userId : null,
+            metadata:
+                metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+                    ? (metadata as Record<string, unknown>)
+                    : null,
         });
+        res.status(result.status).json(result.body);
     } catch (error) {
         console.error('Error processing scan:', error);
         res.status(500).json({ error: 'Failed to process scan' });
+    }
+});
+
+app.post('/api/device-scan', async (req, res) => {
+    try {
+        const { deviceId, hostname, scan } = req.body;
+        if (!deviceId || typeof deviceId !== 'string' || !deviceId.trim()) {
+            return res.status(400).json({ error: 'deviceId is required' });
+        }
+        if (!scan || typeof scan !== 'string' || !scan.trim()) {
+            return res.status(400).json({ error: 'scan is required' });
+        }
+
+        const lastSeenIp = readRequestIp(req);
+        const device = await upsertScannerDeviceHeartbeat({
+            deviceId,
+            hostname: typeof hostname === 'string' ? hostname : null,
+            lastSeenIp,
+        });
+
+        if (!device.enabled) {
+            return res.status(403).json({
+                error: 'Scanner device is disabled',
+                code: 'device_disabled',
+                deviceId: device.deviceId,
+            });
+        }
+
+        const assignment = await resolveScannerDeviceAssignment(device.deviceId);
+        const baseMetadata: Record<string, unknown> = {
+            source: 'scanner_device',
+            deviceId: device.deviceId,
+            hostname: device.hostname,
+            lastSeenIp,
+            machineId: assignment.machineId,
+        };
+
+        if (!assignment.machineId || !assignment.payloadOperations?.length) {
+            const auditScan = await recordScannedCode(
+                scan,
+                null,
+                null,
+                null,
+                timestampedMetadata({
+                    ...baseMetadata,
+                    assignmentError: assignment.reason,
+                }),
+                null
+            );
+            return res.status(409).json({
+                error: assignment.reason ?? 'Scanner device is not configured yet',
+                code: 'device_not_configured',
+                device,
+                recordedScan: {
+                    scan_id: auditScan.scan_id,
+                    code_text: auditScan.code_text,
+                    scanned_at: auditScan.scanned_at,
+                },
+            });
+        }
+
+        const result = await processScanRequest({
+            scan,
+            machineId: assignment.machineId,
+            operations: assignment.payloadOperations,
+            metadata: baseMetadata,
+        });
+
+        res.status(result.status).json({
+            ...result.body,
+            deviceId: device.deviceId,
+            machineId: assignment.machineId,
+        });
+    } catch (error) {
+        console.error('Error processing device scan:', error);
+        res.status(500).json({ error: 'Failed to process device scan' });
     }
 });
 
@@ -1232,11 +1700,18 @@ async function runProcessing() {
 }
 
 function startScheduledProcessing() {
+    if (!isAutomaticScanProcessingEnabled()) {
+        console.log(
+            '[server] Automatic scan/Print OS processing is OFF (DISABLE_SCAN_PROCESSING). ' +
+                'POST /api/process-status-updates still works manually.'
+        );
+        return;
+    }
+
     backfillLegacyIndigoMachineIdsOnLogs().catch((err) =>
         console.warn('[server] Indigo machine_id backfill:', err?.message || err)
     );
 
-    // Run immediately on startup
     runProcessing();
     runPrintOsOnly();
 

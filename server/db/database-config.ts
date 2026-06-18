@@ -71,3 +71,98 @@ export function isDedicatedLogsDatabase(): boolean {
     return false;
   }
 }
+
+/**
+ * Legacy **jobmanager** database: on many installs `"print OS"` lives here while
+ * Prisma + planner tables live on `DATABASE_URL`.
+ *
+ * When unset, `"print OS"` is read from the **app** pool (same as `DATABASE_URL`).
+ * Set `JOBMANAGER_DATABASE_URL` (e.g. `…/jobmanager`) to match your Print OS location.
+ */
+export function getPrintOsDatabaseUrl(): string | null {
+  const u = process.env.JOBMANAGER_DATABASE_URL?.trim();
+  return u || null;
+}
+
+/**
+ * When true (`PRINT_OS_CURSOR_USE_ROW_ID=true`): `processing_markers.print_os` stores the last `"print OS".id`,
+ * polling uses `WHERE id > cursor ORDER BY id ASC`.
+ * When false/unset: legacy `"print OS".marker` cursor.
+ *
+ * Cursor values are not interchangeable — after enabling, set `last_processed_id` from jobmanager `MAX(id)` once.
+ */
+export function printOsCursorUsesRowId(): boolean {
+  const v = process.env.PRINT_OS_CURSOR_USE_ROW_ID?.trim().toLowerCase();
+  return v === "true" || v === "1";
+}
+
+/** When true, skip Printbeat reads in production-status enrich (same DB pool as `"print OS"`). */
+export function isPrintbeatRealtimeEnrichDisabled(): boolean {
+  const v = process.env.PRINTBEAT_REALTIME_DISABLED?.trim().toLowerCase();
+  return v === 'true' || v === '1';
+}
+
+/**
+ * PostgreSQL identifier for the HP Printbeat realtime table (spaces allowed).
+ * Override with PRINTBEAT_REALTIME_TABLE if your deployment uses a different name.
+ */
+export function getPrintbeatRealtimeTableSqlIdentifier(): string {
+  const raw = process.env.PRINTBEAT_REALTIME_TABLE?.trim();
+  const name = raw || 'Printbeat data Real time';
+  return `"${name.replace(/"/g, '""')}"`;
+}
+
+/** Rows older than this are ignored as live press signal (minutes). */
+export function getPrintbeatMaxAgeMinutes(): number {
+  const n = parseInt(process.env.PRINTBEAT_MAX_AGE_MINUTES ?? '', 10);
+  return Number.isFinite(n) && n > 0 ? n : 20;
+}
+
+/**
+ * Lowest Printbeat row `id` to consider (`WHERE id >= n`).Unset / invalid = no floor (0).
+ * Use with test backfills from a known PK (e.g. 316298).
+ */
+export function getPrintbeatMinId(): number {
+  const n = parseInt(process.env.PRINTBEAT_MIN_ID ?? '', 10);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/**
+ * When true: take the **next** Indigo Printbeat row with `id` greater than {@link processing_markers}
+ * `processing_markers.printbeat_enrich` (ASC by id), then advance that marker. Ignores freshness window so
+ * historical IDs work. Live mode stays default (false): latest row by `updated_at`, optional min id only.
+ */
+export function isPrintbeatIdMarkerSequentialEnabled(): boolean {
+  const v = process.env.PRINTBEAT_USE_ID_MARKER?.trim().toLowerCase();
+  return v === 'true' || v === '1';
+}
+
+/** When true, skip Bladerunner cutter live reads for digital_cutter production-status enrich. */
+export function isBladerunnerCutterLiveDisabled(): boolean {
+  const v = process.env.BLADERUNNER_CUTTER_LIVE_DISABLED?.trim().toLowerCase();
+  return v === 'true' || v === '1';
+}
+
+/**
+ * PostgreSQL identifier for Bladerunner digital-cut live row (spaces allowed).
+ * Override with BLADERUNNER_CUTTER_LIVE_TABLE if your deployment uses a different name.
+ */
+export function getBladerunnerCutterLiveTableSqlIdentifier(): string {
+  const raw = process.env.BLADERUNNER_CUTTER_LIVE_TABLE?.trim();
+  const name = raw || 'Bladerunner cutter live';
+  return `"${name.replace(/"/g, '""')}"`;
+}
+
+/** Unquoted Postgres identifier (`FROM name`). Columns: `imposition_id`, `lm`. Override IMPOSITION_DURATION_VIEW_NAME. */
+export function impositionDurationViewPlainIdentifier(): string {
+  const raw = process.env.IMPOSITION_DURATION_VIEW_NAME?.trim().toLowerCase();
+  if (raw && /^[a-z_][a-z0-9_]*$/.test(raw)) return raw;
+  return 'imposition_duration_view';
+}
+
+/**
+ * Transitional strict guards for op001 scan enrich. Disabled when set exactly to `false`.
+ */
+export function isOp001EnrichStrictGuardsEnabled(): boolean {
+  return process.env.OP001_ENRICH_STRICT_GUARDS !== 'false';
+}

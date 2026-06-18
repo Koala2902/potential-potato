@@ -4,6 +4,11 @@ import { isDedicatedLogsDatabase } from './database-config.js';
 import { isUndefinedTableError } from './pg-errors.js';
 import { prisma } from './prisma.js';
 import {
+    getCachedSchedulerMachinesForApi,
+    getCachedSchedulerOperationsForMachine,
+    resolveMachineIdForPlannerOperationIds,
+} from './scheduler-catalog-cache.js';
+import {
     parseSchedulerModes,
     type SchedulerMode,
 } from '../../src/lib/scheduler/machine-routing.ts';
@@ -42,56 +47,48 @@ export function normalizeOperationsPayloadForStorage(
 
 /** Extract job_id and version_tag from a Labex `file_id` (shared with scan pipeline). */
 export function parseFileId(fileId: string): { jobId: string; versionTag: string } | null {
-    // Skip file_ids without "labex" (case insensitive)
     if (!fileId.toLowerCase().includes('labex')) {
         return null;
     }
-    
+
+    // Short form: Labex_6148_8038, Labex_6172_8071_1 (no FILE_ prefix)
+    const short = fileId.match(/^Labex_(\d+_\d+)(?:_(\d+))?(?:_|$)/i);
+    if (short) {
+        return { jobId: short[1]!, versionTag: short[2] || '1' };
+    }
+
     // Pattern: FILE_<version>_Labex_<job_id>_*
-    // Job_id can have multiple underscores (e.g., 4677_5995)
-    // Example: FILE_1_Labex_4677_5995_80 -> version: 1, jobId: 4677_5995
-    
-    // Match the pattern: FILE_<version>_Labex_<everything_after>
-    const match = fileId.match(/^FILE_(\d+)_Labex_(.+)$/);
+    const match = fileId.match(/^FILE_(\d+)_Labex_(.+)$/i);
     if (!match) {
         return null;
     }
-    
-    const versionTag = match[1];
-    const afterLabex = match[2];
-    
-    // Split by underscore - the job_id is everything except the last part
-    // The last part is usually a page number or identifier (e.g., 80, 1, etc.)
+
+    const versionTag = match[1]!;
+    const afterLabex = match[2]!;
     const parts = afterLabex.split('_');
     let jobId: string;
-    
+
     if (parts.length >= 2) {
-        // Extract job_id: take numeric parts at the beginning (e.g., "4677_5995")
-        // Stop when we encounter non-numeric or descriptive text
-        // Example: "4677_5995_50 x 50 mm_Circle..." -> jobId: "4677_5995"
         const numericParts: string[] = [];
         for (const part of parts) {
-            // Check if part is purely numeric (allows underscores in numbers)
             if (/^\d+$/.test(part)) {
                 numericParts.push(part);
             } else {
-                // Stop at first non-numeric part
                 break;
             }
         }
-        
+
         if (numericParts.length >= 2) {
-            // Job_id is the numeric parts joined (e.g., "4677_5995")
-            jobId = numericParts.join('_');
+            jobId = `${numericParts[0]}_${numericParts[1]}`;
+        } else if (numericParts.length === 1) {
+            jobId = numericParts[0]!;
         } else {
-            // Fallback: take all parts except the last one
             jobId = parts.slice(0, -1).join('_');
         }
     } else {
-        // If only one part, use it as job_id (shouldn't happen normally, but handle it)
         jobId = afterLabex;
     }
-    
+
     return { jobId, versionTag };
 }
 
@@ -124,27 +121,12 @@ export interface ScannedCode {
 export async function getMachineIdForPlannerOperations(
     plannerOperationIds: string[]
 ): Promise<string | null> {
-    const ids = plannerOperationIds.map((s) => s.trim().toLowerCase()).filter(Boolean);
-    if (ids.length === 0) return null;
-    const ops = await prisma.operation.findMany({
-        where: {
-            OR: [
-                { id: { in: ids } },
-                { plannerOperationId: { in: ids, mode: 'insensitive' } },
-            ],
-        },
-        select: { machineId: true, sortOrder: true },
-        orderBy: [{ sortOrder: 'desc' }],
-    });
-    return ops[0]?.machineId ?? null;
+    return resolveMachineIdForPlannerOperationIds(plannerOperationIds);
 }
 
 /** Presses from `scheduler.Machine` on the app DB (`DATABASE_URL`) — single catalog (no `public.machines`). */
 export async function getMachines(): Promise<Machine[]> {
-    const rows = await prisma.machine.findMany({
-        where: { enabled: true },
-        orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
-    });
+    const rows = await getCachedSchedulerMachinesForApi();
     return rows.map((m) => ({
         machine_id: m.id,
         machine_name: m.displayName || m.name,
@@ -222,17 +204,7 @@ export async function getAvailableOperations(
     if (!mid) {
         return [];
     }
-    const rows = await prisma.operation.findMany({
-        where: { machineId: mid, enabled: true },
-        orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
-    });
-    return rows.map((o) => ({
-        scheduler_operation_id: o.id,
-        planner_operation_id: o.plannerOperationId ?? null,
-        operation_name: o.name,
-        description: o.notes ?? undefined,
-        created_at: undefined,
-    }));
+    return getCachedSchedulerOperationsForMachine(mid);
 }
 
 /** Modes from `Machine.constants.schedulerModes` (config UI), not legacy `machine_modes`. */
@@ -543,6 +515,148 @@ function buildJobStatusViewWhere(
 }
 
 const RUNLIST_BATCH_SIZE = 80;
+const JOB_LANE_OVERRIDE_TTL_HOURS = 24;
+const JOB_LANE_OVERRIDE_ALLOWED_OPS = new Set(['op001', 'op002', 'op003', 'op004']);
+
+function statusForLaneOperation(operationId: string): string {
+    switch (operationId) {
+        case 'op004':
+            return 'production_finished';
+        case 'op003':
+            return 'slitter';
+        case 'op002':
+            return 'digital_cut';
+        case 'op001':
+        default:
+            return 'printed';
+    }
+}
+
+async function fetchActiveJobLaneOverrides(
+    client: import('pg').PoolClient,
+    jobIds: string[]
+): Promise<Map<string, { operationId: string; updatedAt: string | null }>> {
+    const uniqueJobIds = Array.from(new Set(jobIds.map((id) => String(id || '').trim()).filter(Boolean)));
+    if (uniqueJobIds.length === 0) return new Map();
+    try {
+        const result = await client.query(
+            `SELECT job_id, operation_id, updated_at
+             FROM job_lane_overrides
+             WHERE job_id = ANY($1::text[])
+               AND expires_at > NOW()`,
+            [uniqueJobIds]
+        );
+        const map = new Map<string, { operationId: string; updatedAt: string | null }>();
+        for (const row of result.rows) {
+            const op = String(row.operation_id || '').trim().toLowerCase();
+            if (!JOB_LANE_OVERRIDE_ALLOWED_OPS.has(op)) continue;
+            map.set(String(row.job_id), {
+                operationId: op,
+                updatedAt: row.updated_at ? String(row.updated_at) : null,
+            });
+        }
+        return map;
+    } catch (error: any) {
+        if (
+            String(error?.code || '') === '42P01' ||
+            String(error?.message || '').includes('job_lane_overrides')
+        ) {
+            // Migration not applied yet; keep legacy behavior.
+            return new Map();
+        }
+        throw error;
+    }
+}
+
+function applyJobLaneOverrides(
+    rows: any[],
+    overrides: Map<string, { operationId: string; updatedAt: string | null }>
+): any[] {
+    if (rows.length === 0 || overrides.size === 0) return rows;
+    return rows.map((row) => {
+        const override = overrides.get(String(row.job_id));
+        if (!override) return row;
+        const next = { ...row };
+        next.latest_completed_operation_id = override.operationId;
+        next.status = statusForLaneOperation(override.operationId);
+        // Keep rows fresh in latest sort when a manual move happened recently.
+        if (override.updatedAt) {
+            const existing = next.updated_at ? Date.parse(String(next.updated_at)) : NaN;
+            const movedAt = Date.parse(override.updatedAt);
+            if (!Number.isFinite(existing) || (Number.isFinite(movedAt) && movedAt > existing)) {
+                next.updated_at = override.updatedAt;
+            }
+        }
+        return next;
+    });
+}
+
+async function applySharedLaneOverrides(
+    client: import('pg').PoolClient,
+    rows: any[]
+): Promise<any[]> {
+    const overrides = await fetchActiveJobLaneOverrides(
+        client,
+        rows.map((r) => String(r.job_id))
+    );
+    return applyJobLaneOverrides(rows, overrides);
+}
+
+export async function upsertJobLaneOverride(
+    jobId: string,
+    operationId: string,
+    source = 'job_page',
+    options?: { ttlHours?: number; actor?: string | null }
+): Promise<void> {
+    const normalizedJobId = String(jobId || '').trim();
+    const normalizedOperationId = String(operationId || '').trim().toLowerCase();
+    if (!normalizedJobId) return;
+    if (!JOB_LANE_OVERRIDE_ALLOWED_OPS.has(normalizedOperationId)) {
+        throw new Error(`Invalid lane override operation: ${operationId}`);
+    }
+    const ttlHours = Math.max(1, Math.floor(options?.ttlHours ?? JOB_LANE_OVERRIDE_TTL_HOURS));
+    const viewPool = poolForJobPipelineViews();
+    const client = await viewPool.connect();
+    try {
+        await client.query(
+            `INSERT INTO job_lane_overrides (
+                job_id,
+                operation_id,
+                source,
+                actor,
+                updated_at,
+                expires_at
+            )
+            VALUES (
+                $1,
+                $2,
+                $3,
+                $4,
+                NOW(),
+                NOW() + ($5::text || ' hours')::interval
+            )
+            ON CONFLICT (job_id)
+            DO UPDATE
+            SET operation_id = EXCLUDED.operation_id,
+                source = EXCLUDED.source,
+                actor = EXCLUDED.actor,
+                updated_at = EXCLUDED.updated_at,
+                expires_at = EXCLUDED.expires_at`,
+            [normalizedJobId, normalizedOperationId, source, options?.actor ?? null, String(ttlHours)]
+        );
+    } catch (error: any) {
+        if (
+            String(error?.code || '') === '42P01' ||
+            String(error?.message || '').includes('job_lane_overrides')
+        ) {
+            // Migration not applied yet; don't fail drag-drop API.
+            return;
+        }
+        throw error;
+    } finally {
+        client.release();
+    }
+}
 
 /** Resolve ALL runlist_ids for each job (a job can be in multiple runlists).
  * Returns Map<job_id, runlist_id[]>. Searches all version_tags per job. */
@@ -651,7 +765,7 @@ async function queryJobStatusViewFast(
         }
     }
     const result = await client.query(query, params);
-    return result.rows.map(mapJobStatusRowWithoutRunlist);
+    return applySharedLaneOverrides(client, result.rows.map(mapJobStatusRowWithoutRunlist));
 }
 
 /** Primary path: read job_status_runlist_view (runlist resolved in Postgres). LIMIT applies to distinct jobs via CTE. */
@@ -697,7 +811,7 @@ async function queryJobStatusRunlistView(
 
     try {
         const result = await client.query(primaryQuery, params);
-        return result.rows.map(mapJobStatusRow);
+        return applySharedLaneOverrides(client, result.rows.map(mapJobStatusRow));
     } catch (error: any) {
         if (error.message?.includes('column') && error.message?.includes('does not exist')) {
             const fbParams = [...baseParams];
@@ -719,7 +833,7 @@ async function queryJobStatusRunlistView(
       ORDER BY job_id DESC, runlist_id NULLS LAST`;
             }
             const result = await client.query(fb, fbParams);
-            return result.rows.map(mapJobStatusRow);
+            return applySharedLaneOverrides(client, result.rows.map(mapJobStatusRow));
         }
         throw error;
     }
@@ -799,7 +913,7 @@ async function getJobsUsingStatusViewAndBatch(
             }
         }
     }
-    return jobsWithRunlist;
+    return applySharedLaneOverrides(client, jobsWithRunlist);
 }
 
 // Get all jobs from job_status_runlist_view (pipeline DB), or legacy path if view missing
@@ -1057,13 +1171,14 @@ async function getJobsFallback(filters?: JobFilterOptions): Promise<any[]> {
             ? filters.excludeStatus.includes('production_finished')
             : filters?.excludeStatus === 'production_finished';
         const onlyFinished = filters?.status === 'production_finished';
+        const rowsWithOverrides = await applySharedLaneOverrides(client, jobsWithRunlist);
         if (onlyFinished) {
-            return jobsWithRunlist.filter((j: any) => j.status === 'production_finished');
+            return rowsWithOverrides.filter((j: any) => j.status === 'production_finished');
         }
         if (excludeFinished) {
-            return jobsWithRunlist.filter((j: any) => j.status !== 'production_finished');
+            return rowsWithOverrides.filter((j: any) => j.status !== 'production_finished');
         }
-        return jobsWithRunlist;
+        return rowsWithOverrides;
     } finally {
         client.release();
     }
