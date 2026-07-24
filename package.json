@@ -78,11 +78,11 @@
     "@types/pg": "^8.10.9",
     "@types/react": "^18.2.45",
     "@types/react-dom": "^18.2.18",
-    "@vitejs/plugin-react": "^4.2.1",
+    "@vitejs/plugin-react": "^6.0.4",
     "concurrently": "^8.2.2",
     "tsx": "^4.7.0",
     "typescript": "~5.9.3",
-    "vite": "^7.2.4",
+    "vite": "^8.1.5",
     "wait-on": "^9.0.10"
   }
 }
